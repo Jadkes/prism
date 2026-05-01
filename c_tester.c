@@ -881,24 +881,28 @@ static const ErrorPattern error_patterns[] = {
 static const int num_patterns = sizeof(error_patterns) / sizeof(error_patterns[0]);
 
 /*
- * classify_error - Determine error type from error line
+ * classify_error - Determine error pattern index from error line
  *
  * WHY: Sanitizer output contains specific keywords that identify
  *      the type of error (e.g., "heap-buffer-overflow").
+ *      Returns pattern index so caller gets correct title/fix.
+ *
+ * @param error_line - Single line from sanitizer output
+ * @return Pattern index (0..num_patterns-1), or -1 if no match
  */
-ErrorType classify_error(const char *error_line)
+int classify_error(const char *error_line)
 {
     int i;
 
     if (!error_line)
-        return ERR_UNKNOWN;
+        return -1;
 
     for (i = 0; i < num_patterns; i++) {
         if (string_contains(error_line, error_patterns[i].pattern))
-            return error_patterns[i].type;
+            return i;
     }
 
-    return ERR_UNKNOWN;
+    return -1;
 }
 
 /*
@@ -913,7 +917,6 @@ int parse_sanitizer_errors(const char *error_output,
     char line[MAX_LINE_LEN];
     const char *pos, *line_start, *line_end;
     int count = 0;
-    ErrorType type;
     unsigned int seen_types = 0;
 
     if (!error_output || !errors || max_errors <= 0)
@@ -933,8 +936,9 @@ int parse_sanitizer_errors(const char *error_output,
         line[len] = '\0';
         trim_whitespace(line);
 
-        type = classify_error(line);
-        if (type != ERR_UNKNOWN && type != ERR_NONE) {
+        int pattern_idx = classify_error(line);
+        if (pattern_idx >= 0) {
+            ErrorType type = error_patterns[pattern_idx].type;
             unsigned int type_bit = (1u << type);
             if (seen_types & type_bit) {
                 pos = *line_end ? line_end + 1 : line_end;
@@ -943,24 +947,16 @@ int parse_sanitizer_errors(const char *error_output,
             seen_types |= type_bit;
 
             errors[count].type = type;
-            errors[count].severity = 0;
+            errors[count].severity = error_patterns[pattern_idx].severity;
             errors[count].source_line = 0;
             errors[count].has_source = false;
             errors[count].source_file[0] = '\0';
 
-            /* Find the pattern entry for title and fix */
-            int i;
-            for (i = 0; i < num_patterns; i++) {
-                if (error_patterns[i].type == type) {
-                    snprintf(errors[count].title, sizeof(errors[count].title),
-                             "%s", error_patterns[i].title);
-                    snprintf(errors[count].fix_suggestion,
-                             sizeof(errors[count].fix_suggestion),
-                             "%s", error_patterns[i].fix);
-                    errors[count].severity = error_patterns[i].severity;
-                    break;
-                }
-            }
+            snprintf(errors[count].title, sizeof(errors[count].title),
+                     "%s", error_patterns[pattern_idx].title);
+            snprintf(errors[count].fix_suggestion,
+                     sizeof(errors[count].fix_suggestion),
+                     "%s", error_patterns[pattern_idx].fix);
 
             /* Try to extract file:line from nearby lines */
             const char *file_ref = strstr(line, ".c:");
@@ -1352,6 +1348,46 @@ int generate_html_report(const char *html_path, const char **source_files,
 }
 
 /*
+ * print_usage - Print comprehensive help message and exit
+ *
+ * WHY: Users need clear documentation of available options and examples
+ *      to use the tool effectively. Grouped options improve readability.
+ *
+ * @param prog_name - Program name from argv[0]
+ * @param colors - Color codes for colored output
+ */
+void print_usage(const char *prog_name, const ColorCodes *colors)
+{
+    print_colored(colors, colors->bold, "c_tester - C Error Detection Tool\n");
+    printf("Detects memory errors, undefined behavior, and bugs in C/C++ code.\n\n");
+
+    print_colored(colors, colors->bold, "Usage: ");
+    printf("%s [options] <source.c> [source2.c ...]\n\n", prog_name);
+
+    print_colored(colors, colors->bold, "Analysis:\n");
+    printf("  --tsan         Use ThreadSanitizer to detect data races\n");
+    printf("  --valgrind     Run under Valgrind for deep memory analysis\n\n");
+
+    print_colored(colors, colors->bold, "Output:\n");
+    printf("  --html=<path>  Generate HTML report at specified path\n");
+    printf("  --no-color     Disable colored output\n\n");
+
+    print_colored(colors, colors->bold, "Execution:\n");
+    printf("  --keep         Keep compiled binary after run\n");
+    printf("  --timeout=N    Set execution timeout in seconds (default: %d)\n\n",
+           DEFAULT_TIMEOUT_SEC);
+
+    print_colored(colors, colors->bold, "Examples:\n");
+    printf("  %s main.c                          Basic error detection\n", prog_name);
+    printf("  %s --tsan main.c                   Detect data races\n", prog_name);
+    printf("  %s --valgrind main.c               Deep memory analysis\n", prog_name);
+    printf("  %s --html=report.html main.c       Generate HTML report\n", prog_name);
+    printf("  %s main.c utils.c helper.c         Multi-file project\n\n", prog_name);
+
+    printf("Supported files: .c, .cpp, .cxx, .cc\n");
+}
+
+/*
  * main - CLI entry point for c_tester
  *
  * WHY: Parse command-line arguments, orchestrate the compilation,
@@ -1394,6 +1430,9 @@ int main(int argc, char *argv[])
             use_valgrind = true;
         } else if (strncmp(argv[i], "--html=", 7) == 0) {
             html_path = argv[i] + 7;
+        } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            print_usage(argv[0], &colors);
+            return EXIT_SUCCESS;
         } else if (argv[i][0] != '-') {
             if (source_count < 32) {
                 source_files[source_count++] = argv[i];
@@ -1402,15 +1441,7 @@ int main(int argc, char *argv[])
     }
 
     if (source_count == 0) {
-        print_colored(&colors, colors.bold, "Usage: ");
-        printf("%s [options] <source.c|source.cpp> [source2.c ...]\n", argv[0]);
-        printf("\nOptions:\n");
-        printf("  --keep         Keep compiled binary after run\n");
-        printf("  --timeout=N    Set execution timeout in seconds (default: %d)\n",
-                DEFAULT_TIMEOUT_SEC);
-        printf("  --no-color     Disable colored output\n");
-        printf("  --tsan         Compile with ThreadSanitizer for data race detection\n");
-        printf("  --valgrind     Run under Valgrind for memory error detection\n");
+        print_usage(argv[0], &colors);
         return EXIT_USAGE_ERROR;
     }
 

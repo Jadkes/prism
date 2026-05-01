@@ -279,12 +279,16 @@ int run_with_valgrind(const char *binary,
                       int timeout_sec, pid_t *child_pid);
 
 /*
- * classify_error - Determine error type from error line
+ * classify_error - Determine error pattern index from error line
  *
  * WHY: Sanitizer output contains specific keywords that identify
  *      the type of error (e.g., "heap-buffer-overflow").
+ *      Returns pattern index so caller gets correct title/fix.
+ *
+ * @param error_line - Single line from sanitizer output
+ * @return Pattern index (0..num_patterns-1), or -1 if no match
  */
-ErrorType classify_error(const char *error_line);
+int classify_error(const char *error_line);
 
 /*
  * parse_sanitizer_errors - Extract errors from sanitizer output
