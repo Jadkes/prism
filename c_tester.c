@@ -388,6 +388,21 @@ static const ErrorPattern error_patterns[] = {
     { "stack-overflow",          "Stack Overflow",
       "The call stack exceeded its limit. This is usually caused by infinite recursion. Check your recursive function's base case.",
       ERR_STACK_OVERFLOW, 2 },
+    { "double-free",             "Double Free",
+      "You called free() twice on the same pointer. Set the pointer to NULL after free() and check for NULL before freeing.",
+      ERR_USE_AFTER_FREE, 2 },
+    { "stack-buffer-underflow",  "Buffer Underflow",
+      "You accessed memory before the start of a stack buffer. Check array indices for negative values or off-by-one errors.",
+      ERR_BUFFER_OVERFLOW, 2 },
+    { "heap-buffer-underflow",   "Buffer Underflow",
+      "You accessed memory before the start of a heap buffer. Check array indices for negative values or off-by-one errors.",
+      ERR_BUFFER_OVERFLOW, 2 },
+    { "shift exponent",          "Invalid Shift",
+      "A shift operation used an invalid exponent (negative or >= type width). Ensure shift amounts are within valid range.",
+      ERR_INT_OVERFLOW, 1 },
+    { "free-nonheap",            "Invalid Free",
+      "You called free() on memory that was not allocated by malloc/calloc/realloc. Only free dynamically allocated memory.",
+      ERR_UNKNOWN, 2 },
 };
 
 static const int num_patterns = sizeof(error_patterns) / sizeof(error_patterns[0]);
