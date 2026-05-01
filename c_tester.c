@@ -830,6 +830,18 @@ static const ErrorPattern error_patterns[] = {
     { "free-nonheap",            "Invalid Free",
       "You called free() on memory that was not allocated by malloc/calloc/realloc. Only free dynamically allocated memory.",
       ERR_UNKNOWN, 2 },
+    { "out of bounds",           "Array Out of Bounds",
+      "An array index is outside the valid range. Check loop bounds and array sizes before accessing elements.",
+      ERR_BUFFER_OVERFLOW, 2 },
+    { "insufficient space",      "Buffer Overflow",
+      "A memory access exceeded the allocated buffer size. Check buffer sizes and access bounds.",
+      ERR_BUFFER_OVERFLOW, 2 },
+    { "alloc-size-larger-than",  "Excessive Allocation",
+      "An allocation request exceeds the maximum object size. Check for integer overflow in size calculations.",
+      ERR_INT_OVERFLOW, 2 },
+    { "free-nonheap-object",     "Invalid Free",
+      "You called free() on a pointer that was not returned by malloc. Only free the original allocation pointer.",
+      ERR_UNKNOWN, 2 },
     { "WARNING: ThreadSanitizer: data race", "Data Race",
       "Two threads access the same memory without synchronization. Use mutexes (pthread_mutex_t) or atomic variables (stdatomic.h) to protect shared data.",
       ERR_DATA_RACE, 2 },
@@ -1579,10 +1591,16 @@ int main(int argc, char *argv[])
             errors[0].type = ERR_BUFFER_OVERFLOW;
         else if (string_contains(result.compiler_output, "stringop-overflow"))
             errors[0].type = ERR_BUFFER_OVERFLOW;
-        else
+        else if (string_contains(result.compiler_output, "alloc-size-larger-than"))
+            errors[0].type = ERR_INT_OVERFLOW;
+        else if (string_contains(result.compiler_output, "free-nonheap-object")) {
             errors[0].type = ERR_UNKNOWN;
-        snprintf(errors[0].title, sizeof(errors[0].title),
-                 "%s", get_error_name(errors[0].type));
+            snprintf(errors[0].title, sizeof(errors[0].title), "Invalid Free");
+        } else
+            errors[0].type = ERR_UNKNOWN;
+        if (errors[0].title[0] == '\0')
+            snprintf(errors[0].title, sizeof(errors[0].title),
+                     "%s", get_error_name(errors[0].type));
         char warning_excerpt[512];
         strncpy(warning_excerpt, result.compiler_output, sizeof(warning_excerpt) - 1);
         warning_excerpt[sizeof(warning_excerpt) - 1] = '\0';
