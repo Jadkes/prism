@@ -102,8 +102,11 @@ int run_binary(const char *binary, const char *args,
         return -1;
 
     pid = fork();
-    if (pid < 0)
+    if (pid < 0) {
+        close(stdout_pipe[0]);
+        close(stderr_pipe[0]);
         return -1;
+    }
 
     if (pid == 0) {
         /* Child process */
@@ -129,6 +132,10 @@ int run_binary(const char *binary, const char *args,
     close(stdout_pipe[1]);
     close(stderr_pipe[1]);
 
+    struct timespec deadline;
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
+    deadline.tv_sec += timeout_sec;
+
     while (!stdout_eof || !stderr_eof) {
         FD_ZERO(&read_fds);
         max_fd = 0;
@@ -144,15 +151,30 @@ int run_binary(const char *binary, const char *args,
                 max_fd = stderr_pipe[0];
         }
 
-        tv.tv_sec = timeout_sec;
-        tv.tv_usec = 0;
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        long remaining_ms = (deadline.tv_sec - now.tv_sec) * 1000 +
+                            (deadline.tv_nsec - now.tv_nsec) / 1000000;
+        if (remaining_ms <= 0) {
+            kill(pid, SIGKILL);
+            waitpid(pid, &status, 0);
+            close(stdout_pipe[0]);
+            close(stderr_pipe[0]);
+            if (out_pos < output_size)
+                output[out_pos] = '\0';
+            if (err_pos < error_size)
+                error_output[err_pos] = '\0';
+            return -1;
+        }
+
+        tv.tv_sec = remaining_ms / 1000;
+        tv.tv_usec = (remaining_ms % 1000) * 1000;
 
         int ready = select(max_fd + 1, &read_fds, NULL, NULL, &tv);
         if (ready < 0)
             break;
 
         if (ready == 0) {
-            /* Timeout - kill child */
             kill(pid, SIGKILL);
             waitpid(pid, &status, 0);
             close(stdout_pipe[0]);
@@ -404,6 +426,7 @@ int parse_sanitizer_errors(const char *error_output,
     const char *pos, *line_start, *line_end;
     int count = 0;
     ErrorType type;
+    unsigned int seen_types = 0;
 
     if (!error_output || !errors || max_errors <= 0)
         return 0;
@@ -424,6 +447,13 @@ int parse_sanitizer_errors(const char *error_output,
 
         type = classify_error(line);
         if (type != ERR_UNKNOWN && type != ERR_NONE) {
+            unsigned int type_bit = (1u << type);
+            if (seen_types & type_bit) {
+                pos = *line_end ? line_end + 1 : line_end;
+                continue;
+            }
+            seen_types |= type_bit;
+
             errors[count].type = type;
             errors[count].severity = 0;
             errors[count].source_line = 0;
@@ -447,15 +477,17 @@ int parse_sanitizer_errors(const char *error_output,
             /* Try to extract file:line from nearby lines */
             const char *file_ref = strstr(line, ".c:");
             if (file_ref) {
-                const char *colon = strchr(file_ref + 3, ':');
-                size_t file_len = file_ref - line_start;
+                const char *path_start = file_ref;
+                while (path_start > line && *(path_start - 1) != ' ' &&
+                       *(path_start - 1) != '\t')
+                    path_start--;
+                size_t file_len = file_ref - path_start + 2;
                 if (file_len < MAX_PATH_LEN - 1) {
-                    memcpy(errors[count].source_file, line_start, file_len);
+                    memcpy(errors[count].source_file, path_start, file_len);
                     errors[count].source_file[file_len] = '\0';
                     errors[count].has_source = true;
                 }
-                if (colon)
-                    errors[count].source_line = atoi(colon + 1);
+                errors[count].source_line = atoi(file_ref + 3);
             }
 
             count++;
@@ -787,26 +819,6 @@ int main(int argc, char *argv[])
         result.compilation_success = true;
     }
 
-    /* Check for compiler warnings even on successful compile */
-    if (result.compilation_success &&
-        string_contains(result.compiler_output, "warning:")) {
-        error_count = 1;
-        if (string_contains(result.compiler_output, "uninitialized"))
-            errors[0].type = ERR_UNINIT_VAR;
-        else
-            errors[0].type = ERR_UNKNOWN;
-        snprintf(errors[0].title, sizeof(errors[0].title),
-                 "%s", get_error_name(errors[0].type));
-        /* Truncate compiler output to fit in fix_suggestion buffer */
-        char warning_excerpt[512];
-        strncpy(warning_excerpt, result.compiler_output, sizeof(warning_excerpt) - 1);
-        warning_excerpt[sizeof(warning_excerpt) - 1] = '\0';
-        snprintf(errors[0].fix_suggestion, sizeof(errors[0].fix_suggestion),
-                 "Compiler detected: %s", warning_excerpt);
-        errors[0].severity = 1;
-        errors[0].has_source = false;
-    }
-
     if (!result.compilation_success) {
         print_colored(&colors, colors.red, "[COMPILE ERROR]\n");
         if (result.compiler_output[0])
@@ -817,7 +829,7 @@ int main(int argc, char *argv[])
     struct timespec start_time, end_time;
     clock_gettime(CLOCK_MONOTONIC, &start_time);
 
-    setenv("ASAN_OPTIONS", "detect_leaks=1", 0);
+    setenv("ASAN_OPTIONS", "detect_leaks=1", 1);
 
     result.exit_code = run_binary(binary_path, NULL,
                                    result.runtime_output,
@@ -834,11 +846,30 @@ int main(int argc, char *argv[])
     clock_gettime(CLOCK_MONOTONIC, &end_time);
     get_execution_time(&start_time, &end_time, &result.execution_time_ms);
 
-    /* Parse sanitizer errors (preserve compiler warning errors) */
+    /* Parse sanitizer errors */
     int sanitizer_count = parse_sanitizer_errors(result.sanitizer_output,
                                                   errors + error_count,
                                                   32 - error_count);
     error_count += sanitizer_count;
+
+    /* Only report compiler warnings when no sanitizer errors found */
+    if (error_count == 0 &&
+        string_contains(result.compiler_output, "warning:")) {
+        error_count = 1;
+        if (string_contains(result.compiler_output, "uninitialized"))
+            errors[0].type = ERR_UNINIT_VAR;
+        else
+            errors[0].type = ERR_UNKNOWN;
+        snprintf(errors[0].title, sizeof(errors[0].title),
+                 "%s", get_error_name(errors[0].type));
+        char warning_excerpt[512];
+        strncpy(warning_excerpt, result.compiler_output, sizeof(warning_excerpt) - 1);
+        warning_excerpt[sizeof(warning_excerpt) - 1] = '\0';
+        snprintf(errors[0].fix_suggestion, sizeof(errors[0].fix_suggestion),
+                 "Compiler detected: %s", warning_excerpt);
+        errors[0].severity = 1;
+        errors[0].has_source = false;
+    }
 
     if (error_count == 0 && result.exit_code == -1) {
         errors[0].type = ERR_UNKNOWN;
