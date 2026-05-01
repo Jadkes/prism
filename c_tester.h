@@ -135,6 +135,14 @@ int compile_fallback(const char *source, const char *binary,
                     char *output, size_t output_size);
 
 /*
+ * compile_for_warnings - Compile with warning flags only (no sanitizers)
+ *
+ * WHY: Sanitizers suppress certain warnings (e.g., strict-aliasing).
+ *      A separate warning-only pass catches these at -O2 optimization.
+ */
+int compile_for_warnings(const char *source, char *output, size_t output_size);
+
+/*
  * run_binary - Execute compiled binary with timeout
  *
  * WHY: Need to run test with timeout to catch infinite loops

@@ -35,7 +35,8 @@ int compile_with_sanitizers(const char *source, const char *binary,
 
     snprintf(cmd, sizeof(cmd),
              "gcc -fsanitize=address,undefined -g -fno-omit-frame-pointer "
-             "-Wuninitialized -o '%s' '%s' 2>&1", binary, source);
+             "-Wuninitialized -Wstrict-aliasing=2 -Wformat-overflow=2 "
+             "-Wstringop-overflow=2 -o '%s' '%s' 2>&1", binary, source);
 
     pipe = popen(cmd, "r");
     if (!pipe) {
@@ -72,6 +73,33 @@ int compile_fallback(const char *source, const char *binary,
     }
 
     bytes_read = fread(output, 1, output_size - 1, pipe);
+    output[bytes_read] = '\0';
+
+    return pclose(pipe);
+}
+
+/*
+ * compile_for_warnings - Compile with warning flags only (no sanitizers)
+ *
+ * WHY: Sanitizers suppress certain warnings (e.g., strict-aliasing).
+ *      A separate warning-only pass catches these at -O2 optimization.
+ */
+int compile_for_warnings(const char *source, char *output, size_t output_size)
+{
+    char cmd[MAX_PATH_LEN + 128];
+
+    snprintf(cmd, sizeof(cmd),
+             "gcc -Wall -Wextra -Wpedantic -O2 -Wstrict-aliasing=2 "
+             "-Wformat-overflow=2 -Wstringop-overflow=2 -fsyntax-only "
+             "'%s' 2>&1", source);
+
+    FILE *pipe = popen(cmd, "r");
+    if (!pipe) {
+        snprintf(output, output_size, "Failed to start compiler");
+        return -1;
+    }
+
+    size_t bytes_read = fread(output, 1, output_size - 1, pipe);
     output[bytes_read] = '\0';
 
     return pclose(pipe);
@@ -825,9 +853,19 @@ int main(int argc, char *argv[])
     memset(&result, 0, sizeof(result));
 
     if (compile_with_sanitizers(source_file, binary_path,
-                                 result.compiler_output,
-                                 sizeof(result.compiler_output)) == 0) {
+                                  result.compiler_output,
+                                  sizeof(result.compiler_output)) == 0) {
         result.compilation_success = true;
+        /* Collect warnings that sanitizers suppress */
+        char warn_buf[MAX_OUTPUT_SIZE];
+        if (compile_for_warnings(source_file, warn_buf, sizeof(warn_buf)) == 0 &&
+            warn_buf[0] != '\0') {
+            size_t len = strlen(result.compiler_output);
+            if (len < sizeof(result.compiler_output) - 1) {
+                strncat(result.compiler_output, warn_buf,
+                        sizeof(result.compiler_output) - len - 1);
+            }
+        }
     } else if (compile_fallback(source_file, binary_path,
                                  result.compiler_output,
                                  sizeof(result.compiler_output)) == 0) {
@@ -873,6 +911,12 @@ int main(int argc, char *argv[])
         error_count = 1;
         if (string_contains(result.compiler_output, "uninitialized"))
             errors[0].type = ERR_UNINIT_VAR;
+        else if (string_contains(result.compiler_output, "strict-aliasing"))
+            errors[0].type = ERR_UNKNOWN;
+        else if (string_contains(result.compiler_output, "format-overflow"))
+            errors[0].type = ERR_BUFFER_OVERFLOW;
+        else if (string_contains(result.compiler_output, "stringop-overflow"))
+            errors[0].type = ERR_BUFFER_OVERFLOW;
         else
             errors[0].type = ERR_UNKNOWN;
         snprintf(errors[0].title, sizeof(errors[0].title),
