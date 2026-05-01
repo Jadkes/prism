@@ -1,0 +1,48 @@
+{
+  "active_plan": "/home/jadkeskes/c_tester/.sisyphus/plans/c-tester.md",
+  "started_at": "2026-05-01T18:32:32Z",
+  "session_ids": [
+    "ses_21b8f3cefffeDl3dNbxvpTOyAN"
+  ],
+  "plan_name": "c-tester",
+  "session_origins": {
+    "ses_21b8f3cefffeDl3dNbxvpTOyAN": "direct"
+  },
+  "task_sessions": {
+    "todo:1": {
+      "task_key": "todo:1",
+      "task_label": "1",
+      "task_title": "Install Dependencies + Project Scaffolding",
+      "session_id": "ses_21b636175ffe1GarwpWNLiy4KO",
+      "agent": "Sisyphus-Junior",
+      "category": "quick",
+      "updated_at": "2026-05-01T17:40:30.544Z"
+    },
+    "todo:2": {
+      "task_key": "todo:2",
+      "task_label": "2",
+      "task_title": "Core Engine - Compile, Run, Capture Pipeline",
+      "session_id": "ses_21b5a87eeffeOXPoN3NUP0goqd",
+      "agent": "Sisyphus-Junior",
+      "category": "deep",
+      "updated_at": "2026-05-01T17:49:20.153Z"
+    },
+    "todo:4": {
+      "task_key": "todo:4",
+      "task_label": "4",
+      "task_title": "CLI Interface + Output Formatting + Colors",
+      "session_id": "ses_21b541fcdffeALmc0pyDL2D0rH",
+      "agent": "Sisyphus-Junior",
+      "category": "quick",
+      "updated_at": "2026-05-01T18:03:08.399Z"
+    },
+    "final-wave:f1": {
+      "task_key": "final-wave:f1",
+      "task_label": "F1",
+      "task_title": "**Plan Compliance Audit** - `oracle`",
+      "session_id": "ses_21b352b3effemNhoB8amckIQS4",
+      "agent": "oracle",
+      "updated_at": "2026-05-01T18:28:54.231Z"
+    }
+  }
+}
