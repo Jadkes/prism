@@ -2,11 +2,19 @@
   "active_plan": "/home/jadkeskes/c_tester/.sisyphus/plans/c-tester.md",
   "started_at": "2026-05-01T18:32:32Z",
   "session_ids": [
-    "ses_21b8f3cefffeDl3dNbxvpTOyAN"
+    "ses_21b8f3cefffeDl3dNbxvpTOyAN",
+    "ses_21a9b9e33ffe7DW0qU5xKR0enn",
+    "ses_21a9b7c3dffe7F55ZSIg688unT",
+    "ses_21a9b19faffeHFm75GzBrndW01",
+    "ses_21a9aca96ffeQ1VYzOHgPVn5k0"
   ],
   "plan_name": "c-tester",
   "session_origins": {
-    "ses_21b8f3cefffeDl3dNbxvpTOyAN": "direct"
+    "ses_21b8f3cefffeDl3dNbxvpTOyAN": "direct",
+    "ses_21a9b9e33ffe7DW0qU5xKR0enn": "appended",
+    "ses_21a9b7c3dffe7F55ZSIg688unT": "appended",
+    "ses_21a9b19faffeHFm75GzBrndW01": "appended",
+    "ses_21a9aca96ffeQ1VYzOHgPVn5k0": "appended"
   },
   "task_sessions": {
     "todo:1": {

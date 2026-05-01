@@ -1,13 +1,14 @@
 /*
- * c_tester.c - Core engine for c_tester, a simple C error detection tool
+ * c_tester.c - Core engine for c_tester, a simple C/C++ error detection tool
  *
- * Purpose: Compiles C source files with GCC sanitizers (ASan/UBSan),
+ * Purpose: Compiles C/C++ source files with GCC/G++ sanitizers (ASan/UBSan),
  *          runs them with timeout, captures output, and provides the
  *          foundation for error detection and fix suggestions.
  *
  * Design: Uses popen() for compilation output capture, fork()/execvp()/select()
  *         for binary execution with timeout. Falls back to non-sanitizer
  *         compilation when sanitizer libraries are unavailable.
+ *         Auto-detects language from file extension (.c vs .cpp/.cxx/.cc).
  *
  * Thread-safety: Single-threaded tool, no concurrency concerns.
  */
@@ -15,28 +16,86 @@
 #include "c_tester.h"
 
 /*
- * compile_with_sanitizers - Compile source with ASan and UBSan
+ * compile_with_sanitizers - Compile source files with ASan and UBSan
  *
  * WHY: Sanitizers catch runtime errors at execution time that compilers
  *      miss. ASan catches memory errors, UBSan catches undefined behavior.
+ *      Supports multiple source files compiled into a single binary.
  *
- * @param source - Path to C source file
+ * @param sources - Array of paths to C source files
+ * @param source_count - Number of source files
  * @param binary - Output binary path
  * @param output - Buffer for compiler output
  * @param output_size - Size of output buffer
  * @return 0 on success, non-zero on failure
  */
-int compile_with_sanitizers(const char *source, const char *binary,
-                            char *output, size_t output_size)
+int compile_with_sanitizers(const char **sources, int source_count,
+                             const char *binary,
+                             char *output, size_t output_size)
 {
-    char cmd[MAX_PATH_LEN * 2 + 128];
+    char cmd[MAX_PATH_LEN * 8 + 128];
     FILE *pipe;
     size_t bytes_read;
+    int i;
+    size_t pos;
 
-    snprintf(cmd, sizeof(cmd),
-             "gcc -fsanitize=address,undefined -g -fno-omit-frame-pointer "
-             "-Wuninitialized -Wstrict-aliasing=2 -Wformat-overflow=2 "
-             "-Wstringop-overflow=2 -o '%s' '%s' 2>&1", binary, source);
+    pos = snprintf(cmd, sizeof(cmd),
+                   "gcc -fsanitize=address,undefined -g -fno-omit-frame-pointer "
+                   "-Wuninitialized -Wstrict-aliasing=2 -Wformat-overflow=2 "
+                   "-Wstringop-overflow=2 -o '%s'", binary);
+
+    for (i = 0; i < source_count && pos < sizeof(cmd) - 4; i++) {
+        pos += snprintf(cmd + pos, sizeof(cmd) - pos, " '%s'", sources[i]);
+    }
+
+    pos += snprintf(cmd + pos, sizeof(cmd) - pos, " 2>&1");
+
+    pipe = popen(cmd, "r");
+    if (!pipe) {
+        snprintf(output, output_size, "Failed to start compiler");
+        return -1;
+    }
+
+    bytes_read = fread(output, 1, output_size - 1, pipe);
+    output[bytes_read] = '\0';
+
+    return pclose(pipe);
+}
+
+/*
+ * compile_with_tsan - Compile source files with ThreadSanitizer
+ *
+ * WHY: TSan detects data races and thread synchronization bugs at runtime.
+ *      ASan and TSan are mutually exclusive, so we use a separate function.
+ *      -fno-omit-frame-pointer is required for useful stack traces.
+ *      Supports multiple source files compiled into a single binary.
+ *
+ * @param sources - Array of paths to C source files
+ * @param source_count - Number of source files
+ * @param binary - Output binary path
+ * @param output - Buffer for compiler output
+ * @param output_size - Size of output buffer
+ * @return 0 on success, non-zero on failure
+ */
+int compile_with_tsan(const char **sources, int source_count,
+                       const char *binary,
+                       char *output, size_t output_size)
+{
+    char cmd[MAX_PATH_LEN * 8 + 128];
+    FILE *pipe;
+    size_t bytes_read;
+    int i;
+    size_t pos;
+
+    pos = snprintf(cmd, sizeof(cmd),
+                   "gcc -fsanitize=thread -g -fno-omit-frame-pointer "
+                   "-o '%s'", binary);
+
+    for (i = 0; i < source_count && pos < sizeof(cmd) - 4; i++) {
+        pos += snprintf(cmd + pos, sizeof(cmd) - pos, " '%s'", sources[i]);
+    }
+
+    pos += snprintf(cmd + pos, sizeof(cmd) - pos, " 2>&1");
 
     pipe = popen(cmd, "r");
     if (!pipe) {
@@ -55,16 +114,33 @@ int compile_with_sanitizers(const char *source, const char *binary,
  *
  * WHY: Some systems lack sanitizer libraries. Fallback to basic
  *      compilation with -Wall -Wextra for basic error detection.
+ *      Supports multiple source files compiled into a single binary.
+ *
+ * @param sources - Array of paths to C source files
+ * @param source_count - Number of source files
+ * @param binary - Output binary path
+ * @param output - Buffer for compiler output
+ * @param output_size - Size of output buffer
+ * @return 0 on success, non-zero on failure
  */
-int compile_fallback(const char *source, const char *binary,
-                     char *output, size_t output_size)
+int compile_fallback(const char **sources, int source_count,
+                      const char *binary,
+                      char *output, size_t output_size)
 {
-    char cmd[MAX_PATH_LEN * 2 + 64];
+    char cmd[MAX_PATH_LEN * 8 + 64];
     FILE *pipe;
     size_t bytes_read;
+    int i;
+    size_t pos;
 
-    snprintf(cmd, sizeof(cmd),
-             "gcc -Wall -Wextra -g -o '%s' '%s' 2>&1", binary, source);
+    pos = snprintf(cmd, sizeof(cmd),
+                   "gcc -Wall -Wextra -g -o '%s'", binary);
+
+    for (i = 0; i < source_count && pos < sizeof(cmd) - 4; i++) {
+        pos += snprintf(cmd + pos, sizeof(cmd) - pos, " '%s'", sources[i]);
+    }
+
+    pos += snprintf(cmd + pos, sizeof(cmd) - pos, " 2>&1");
 
     pipe = popen(cmd, "r");
     if (!pipe) {
@@ -83,15 +159,164 @@ int compile_fallback(const char *source, const char *binary,
  *
  * WHY: Sanitizers suppress certain warnings (e.g., strict-aliasing).
  *      A separate warning-only pass catches these at -O2 optimization.
+ *      Supports multiple source files.
+ *
+ * @param sources - Array of paths to C source files
+ * @param source_count - Number of source files
+ * @param output - Buffer for compiler output
+ * @param output_size - Size of output buffer
+ * @return 0 on success, non-zero on failure
  */
-int compile_for_warnings(const char *source, char *output, size_t output_size)
+int compile_for_warnings(const char **sources, int source_count,
+                         char *output, size_t output_size)
 {
-    char cmd[MAX_PATH_LEN + 128];
+    char cmd[MAX_PATH_LEN * 8 + 128];
+    size_t pos;
+    int i;
 
-    snprintf(cmd, sizeof(cmd),
-             "gcc -Wall -Wextra -Wpedantic -O2 -Wstrict-aliasing=2 "
-             "-Wformat-overflow=2 -Wstringop-overflow=2 -fsyntax-only "
-             "'%s' 2>&1", source);
+    pos = snprintf(cmd, sizeof(cmd),
+                   "gcc -Wall -Wextra -Wpedantic -O2 -Wstrict-aliasing=2 "
+                   "-Wformat-overflow=2 -Wstringop-overflow=2 -fsyntax-only");
+
+    for (i = 0; i < source_count && pos < sizeof(cmd) - 4; i++) {
+        pos += snprintf(cmd + pos, sizeof(cmd) - pos, " '%s'", sources[i]);
+    }
+
+    pos += snprintf(cmd + pos, sizeof(cmd) - pos, " 2>&1");
+
+    FILE *pipe = popen(cmd, "r");
+    if (!pipe) {
+        snprintf(output, output_size, "Failed to start compiler");
+        return -1;
+    }
+
+    size_t bytes_read = fread(output, 1, output_size - 1, pipe);
+    output[bytes_read] = '\0';
+
+    return pclose(pipe);
+}
+
+/*
+ * compile_cpp_with_sanitizers - Compile C++ sources with ASan and UBSan
+ *
+ * WHY: Same as compile_with_sanitizers but uses g++ for C++ sources.
+ *      C++ sanitizer output may include std::error messages.
+ *      Supports multiple source files compiled into a single binary.
+ *
+ * @param sources - Array of paths to C++ source files
+ * @param source_count - Number of source files
+ * @param binary - Output binary path
+ * @param output - Buffer for compiler output
+ * @param output_size - Size of output buffer
+ * @return 0 on success, non-zero on failure
+ */
+int compile_cpp_with_sanitizers(const char **sources, int source_count,
+                                  const char *binary,
+                                  char *output, size_t output_size)
+{
+    char cmd[MAX_PATH_LEN * 8 + 128];
+    FILE *pipe;
+    size_t bytes_read;
+    int i;
+    size_t pos;
+
+    pos = snprintf(cmd, sizeof(cmd),
+                   "g++ -fsanitize=address,undefined -g -fno-omit-frame-pointer "
+                   "-Wuninitialized -Wstrict-aliasing=2 -Wformat-overflow=2 "
+                   "-Wstringop-overflow=2 -o '%s'", binary);
+
+    for (i = 0; i < source_count && pos < sizeof(cmd) - 4; i++) {
+        pos += snprintf(cmd + pos, sizeof(cmd) - pos, " '%s'", sources[i]);
+    }
+
+    pos += snprintf(cmd + pos, sizeof(cmd) - pos, " 2>&1");
+
+    pipe = popen(cmd, "r");
+    if (!pipe) {
+        snprintf(output, output_size, "Failed to start compiler");
+        return -1;
+    }
+
+    bytes_read = fread(output, 1, output_size - 1, pipe);
+    output[bytes_read] = '\0';
+
+    return pclose(pipe);
+}
+
+/*
+ * compile_cpp_with_tsan - Compile C++ sources with ThreadSanitizer
+ *
+ * WHY: TSan detects data races in C++ programs.
+ *      ASan and TSan are mutually exclusive.
+ *      Supports multiple source files compiled into a single binary.
+ *
+ * @param sources - Array of paths to C++ source files
+ * @param source_count - Number of source files
+ * @param binary - Output binary path
+ * @param output - Buffer for compiler output
+ * @param output_size - Size of output buffer
+ * @return 0 on success, non-zero on failure
+ */
+int compile_cpp_with_tsan(const char **sources, int source_count,
+                            const char *binary,
+                            char *output, size_t output_size)
+{
+    char cmd[MAX_PATH_LEN * 8 + 128];
+    FILE *pipe;
+    size_t bytes_read;
+    int i;
+    size_t pos;
+
+    pos = snprintf(cmd, sizeof(cmd),
+                   "g++ -fsanitize=thread -g -fno-omit-frame-pointer "
+                   "-o '%s'", binary);
+
+    for (i = 0; i < source_count && pos < sizeof(cmd) - 4; i++) {
+        pos += snprintf(cmd + pos, sizeof(cmd) - pos, " '%s'", sources[i]);
+    }
+
+    pos += snprintf(cmd + pos, sizeof(cmd) - pos, " 2>&1");
+
+    pipe = popen(cmd, "r");
+    if (!pipe) {
+        snprintf(output, output_size, "Failed to start compiler");
+        return -1;
+    }
+
+    bytes_read = fread(output, 1, output_size - 1, pipe);
+    output[bytes_read] = '\0';
+
+    return pclose(pipe);
+}
+
+/*
+ * compile_cpp_for_warnings - Compile C++ with warning flags only
+ *
+ * WHY: Catch C++-specific warnings that sanitizers might suppress.
+ *      Supports multiple source files.
+ *
+ * @param sources - Array of paths to C++ source files
+ * @param source_count - Number of source files
+ * @param output - Buffer for compiler output
+ * @param output_size - Size of output buffer
+ * @return 0 on success, non-zero on failure
+ */
+int compile_cpp_for_warnings(const char **sources, int source_count,
+                              char *output, size_t output_size)
+{
+    char cmd[MAX_PATH_LEN * 8 + 128];
+    size_t pos;
+    int i;
+
+    pos = snprintf(cmd, sizeof(cmd),
+                   "g++ -Wall -Wextra -Wpedantic -O2 -Wstrict-aliasing=2 "
+                   "-Wformat-overflow=2 -Wstringop-overflow=2 -fsyntax-only");
+
+    for (i = 0; i < source_count && pos < sizeof(cmd) - 4; i++) {
+        pos += snprintf(cmd + pos, sizeof(cmd) - pos, " '%s'", sources[i]);
+    }
+
+    pos += snprintf(cmd + pos, sizeof(cmd) - pos, " 2>&1");
 
     FILE *pipe = popen(cmd, "r");
     if (!pipe) {
@@ -251,6 +476,165 @@ int run_binary(const char *binary, const char *args,
 }
 
 /*
+ * run_with_valgrind - Execute binary under Valgrind for memory error detection
+ *
+ * WHY: Valgrind catches memory errors that sanitizers might miss,
+ *      particularly uninitialized reads and subtle memory leaks.
+ *      Runs much slower (10-50x) but provides complementary coverage.
+ *
+ * @param binary - Path to binary to execute under Valgrind
+ * @param output - Buffer for runtime output (stdout)
+ * @param output_size - Size of output buffer
+ * @param error_output - Buffer for Valgrind output (stderr)
+ * @param error_size - Size of error buffer
+ * @param timeout_sec - Maximum execution time in seconds
+ * @param child_pid - Output: PID of child process
+ * @return Exit code of Valgrind/binary, or -1 on failure/timeout
+ */
+int run_with_valgrind(const char *binary,
+                      char *output, size_t output_size,
+                      char *error_output, size_t error_size,
+                      int timeout_sec, pid_t *child_pid)
+{
+    int stdout_pipe[2], stderr_pipe[2];
+    pid_t pid;
+    char *argv[8];
+    int max_fd;
+    fd_set read_fds;
+    struct timeval tv;
+    int stdout_eof = 0, stderr_eof = 0;
+    size_t out_pos = 0, err_pos = 0;
+    int status;
+
+    if (pipe(stdout_pipe) < 0 || pipe(stderr_pipe) < 0)
+        return -1;
+
+    pid = fork();
+    if (pid < 0) {
+        close(stdout_pipe[0]);
+        close(stderr_pipe[0]);
+        return -1;
+    }
+
+    if (pid == 0) {
+        /* Child process */
+        close(stdout_pipe[0]);
+        close(stderr_pipe[0]);
+        dup2(stdout_pipe[1], STDOUT_FILENO);
+        dup2(stderr_pipe[1], STDERR_FILENO);
+        close(stdout_pipe[1]);
+        close(stderr_pipe[1]);
+
+        argv[0] = "valgrind";
+        argv[1] = "--leak-check=full";
+        argv[2] = "--show-leak-kinds=all";
+        argv[3] = "--track-origins=yes";
+        argv[4] = "--error-exitcode=1";
+        argv[5] = (char *)binary;
+        argv[6] = NULL;
+
+        execvp("valgrind", argv);
+        _exit(127);
+    }
+
+    /* Parent process */
+    if (child_pid)
+        *child_pid = pid;
+
+    close(stdout_pipe[1]);
+    close(stderr_pipe[1]);
+
+    struct timespec deadline;
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
+    deadline.tv_sec += timeout_sec;
+
+    while (!stdout_eof || !stderr_eof) {
+        FD_ZERO(&read_fds);
+        max_fd = 0;
+
+        if (!stdout_eof) {
+            FD_SET(stdout_pipe[0], &read_fds);
+            if (stdout_pipe[0] > max_fd)
+                max_fd = stdout_pipe[0];
+        }
+        if (!stderr_eof) {
+            FD_SET(stderr_pipe[0], &read_fds);
+            if (stderr_pipe[0] > max_fd)
+                max_fd = stderr_pipe[0];
+        }
+
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        long remaining_ms = (deadline.tv_sec - now.tv_sec) * 1000 +
+                            (deadline.tv_nsec - now.tv_nsec) / 1000000;
+        if (remaining_ms <= 0) {
+            kill(pid, SIGKILL);
+            waitpid(pid, &status, 0);
+            close(stdout_pipe[0]);
+            close(stderr_pipe[0]);
+            if (out_pos < output_size)
+                output[out_pos] = '\0';
+            if (err_pos < error_size)
+                error_output[err_pos] = '\0';
+            return -1;
+        }
+
+        tv.tv_sec = remaining_ms / 1000;
+        tv.tv_usec = (remaining_ms % 1000) * 1000;
+
+        int ready = select(max_fd + 1, &read_fds, NULL, NULL, &tv);
+        if (ready < 0)
+            break;
+
+        if (ready == 0) {
+            kill(pid, SIGKILL);
+            waitpid(pid, &status, 0);
+            close(stdout_pipe[0]);
+            close(stderr_pipe[0]);
+            if (out_pos < output_size)
+                output[out_pos] = '\0';
+            if (err_pos < error_size)
+                error_output[err_pos] = '\0';
+            return -1;
+        }
+
+        if (FD_ISSET(stdout_pipe[0], &read_fds)) {
+            ssize_t n = read(stdout_pipe[0], output + out_pos,
+                             output_size - out_pos - 1);
+            if (n <= 0)
+                stdout_eof = 1;
+            else
+                out_pos += n;
+        }
+        if (FD_ISSET(stderr_pipe[0], &read_fds)) {
+            ssize_t n = read(stderr_pipe[0], error_output + err_pos,
+                             error_size - err_pos - 1);
+            if (n <= 0)
+                stderr_eof = 1;
+            else
+                err_pos += n;
+        }
+    }
+
+    close(stdout_pipe[0]);
+    close(stderr_pipe[0]);
+
+    if (out_pos < output_size)
+        output[out_pos] = '\0';
+    if (err_pos < error_size)
+        error_output[err_pos] = '\0';
+
+    waitpid(pid, &status, 0);
+
+    if (WIFEXITED(status))
+        return WEXITSTATUS(status);
+    if (WIFSIGNALED(status))
+        return 128 + WTERMSIG(status);
+
+    return -1;
+}
+
+/*
  * generate_temp_path - Create a temporary file path
  *
  * WHY: Need to create temporary binary files for each test
@@ -283,6 +667,21 @@ bool is_c_file(const char *path)
 {
     const char *dot = strrchr(path, '.');
     return dot && string_starts_with(dot, ".c") && dot[2] == '\0';
+}
+
+bool is_source_file(const char *path)
+{
+    return is_c_file(path) || is_cpp_file(path);
+}
+
+bool is_cpp_file(const char *path)
+{
+    const char *dot = strrchr(path, '.');
+    if (!dot)
+        return false;
+    return (strcmp(dot, ".cpp") == 0 ||
+            strcmp(dot, ".cxx") == 0 ||
+            strcmp(dot, ".cc") == 0);
 }
 
 /*
@@ -431,6 +830,52 @@ static const ErrorPattern error_patterns[] = {
     { "free-nonheap",            "Invalid Free",
       "You called free() on memory that was not allocated by malloc/calloc/realloc. Only free dynamically allocated memory.",
       ERR_UNKNOWN, 2 },
+    { "WARNING: ThreadSanitizer: data race", "Data Race",
+      "Two threads access the same memory without synchronization. Use mutexes (pthread_mutex_t) or atomic variables (stdatomic.h) to protect shared data.",
+      ERR_DATA_RACE, 2 },
+    { "WARNING: ThreadSanitizer: lock-order-inversion", "Lock Order Inversion",
+      "Threads acquired locks in inconsistent order, risking deadlock. Always acquire locks in the same global order across all threads.",
+      ERR_DATA_RACE, 2 },
+    { "WARNING: ThreadSanitizer: signal-unsafe-call", "Signal-Unsafe Call",
+      "A signal handler called a function that is not async-signal-safe. Use only async-signal-safe functions (see man 7 signal-safety) in signal handlers.",
+      ERR_DATA_RACE, 2 },
+    { "std::bad_alloc",          "Bad Allocation",
+      "Memory allocation failed (std::bad_alloc). The system ran out of memory. Check for memory leaks or excessive allocations.",
+      ERR_BAD_ALLOC, 2 },
+    { "std::out_of_range",       "Out of Range",
+      "A container access was out of bounds (std::out_of_range). Use at() with try/catch, or check index against size() before accessing.",
+      ERR_OUT_OF_RANGE, 2 },
+    { "std::logic_error",         "Logic Error",
+      "A logical precondition was violated (std::logic_error). Review the code logic and ensure all preconditions are met before operations.",
+      ERR_LOGIC_ERROR, 1 },
+    { "pure virtual method called", "Pure Virtual Method Called",
+      "A pure virtual function was called, usually due to deleting an object while a base class destructor or method is still running. Avoid deleting objects from within their own member functions.",
+      ERR_PURE_VIRTUAL, 2 },
+    { "double free or corruption", "Double Free or Corruption",
+      "The heap was corrupted, possibly by double-free or invalid free. Check all free/delete calls and ensure pointers are set to NULL/nullptr after deletion.",
+      ERR_DOUBLE_FREE_CPP, 2 },
+    /* Valgrind-specific patterns */
+    { "Invalid read",           "Invalid Read",
+      "Valgrind detected an invalid read (out-of-bounds or use-after-free). Check array bounds and ensure pointers are valid before dereferencing.",
+      ERR_BUFFER_OVERFLOW, 2 },
+    { "Invalid write",          "Invalid Write",
+      "Valgrind detected an invalid write (out-of-bounds or use-after-free). Check array bounds and ensure pointers are valid before writing.",
+      ERR_BUFFER_OVERFLOW, 2 },
+    { "Use of uninitialised",   "Uninitialized Value",
+      "Valgrind detected use of an uninitialized value. Initialize all variables before use, or check code paths to ensure initialization.",
+      ERR_UNINIT_VAR, 1 },
+    { "Conditional jump or move depends on uninitialised", "Uninitialized Conditional",
+      "A conditional branch depends on an uninitialized value. Initialize the variable before use or ensure all code paths set it.",
+      ERR_UNINIT_VAR, 1 },
+    { "definitely lost",        "Memory Leak (Definite)",
+      "Memory was definitely lost (no pointers remain). Add free() for every malloc/calloc/realloc call and track all allocations.",
+      ERR_MEMORY_LEAK, 1 },
+    { "possibly lost",          "Memory Leak (Possible)",
+      "Memory was possibly lost (pointer may have been moved). Check pointer arithmetic and ensure proper ownership tracking.",
+      ERR_MEMORY_LEAK, 1 },
+    { "Uninitialised",          "Uninitialized Value",
+      "An uninitialized value was used in a way that affects program behavior. Initialize all variables before use.",
+      ERR_UNINIT_VAR, 1 },
 };
 
 static const int num_patterns = sizeof(error_patterns) / sizeof(error_patterns[0]);
@@ -556,7 +1001,7 @@ int parse_signal_errors(const char *error_output, int exit_code,
         return 0;
 
     if (signal == SIGSEGV || exit_code == 139) {
-        errors[0].type = ERR_SEGV;
+        errors[0].type = ERR_SEG;
         snprintf(errors[0].title, sizeof(errors[0].title),
                  "Segmentation Fault");
         snprintf(errors[0].fix_suggestion, sizeof(errors[0].fix_suggestion),
@@ -619,8 +1064,14 @@ const char *get_error_name(ErrorType type)
     case ERR_DIV_BY_ZERO:     return "Division by Zero";
     case ERR_UNINIT_VAR:      return "Uninitialized Variable";
     case ERR_STACK_OVERFLOW:  return "Stack Overflow";
-    case ERR_SEGV:            return "Segmentation Fault";
+    case ERR_SEG:            return "Segmentation Fault";
     case ERR_ABORT:           return "Program Aborted";
+    case ERR_DATA_RACE:       return "Data Race";
+    case ERR_BAD_ALLOC:        return "Bad Allocation";
+    case ERR_OUT_OF_RANGE:     return "Out of Range";
+    case ERR_LOGIC_ERROR:      return "Logic Error";
+    case ERR_PURE_VIRTUAL:    return "Pure Virtual Method Called";
+    case ERR_DOUBLE_FREE_CPP: return "Double Free or Corruption";
     case ERR_UNKNOWN:         return "Unknown Error";
     case ERR_NONE:            return "No Error";
     }
@@ -716,21 +1167,33 @@ void print_colored(const ColorCodes *colors, const char *color,
 }
 
 /*
- * print_banner - Print banner showing file being tested
+ * print_banner - Print banner showing file(s) being tested
  *
- * WHY: Visual header helps user identify which file is being
+ * WHY: Visual header helps user identify which file(s) are being
  *      tested, especially when running multiple tests.
+ *      Shows file count when multiple files are provided.
  */
-void print_banner(const ColorCodes *colors, const char *filename)
+void print_banner(const ColorCodes *colors, const char **source_files, int source_count)
 {
-    if (!colors || !filename)
+    int i;
+
+    if (!colors || !source_files || source_count <= 0)
         return;
 
     printf("========================================\n");
     print_colored(colors, colors->bold, "  c_tester - C Error Detection Tool\n");
     printf("========================================\n");
     print_colored(colors, colors->cyan, "Testing: ");
-    printf("%s\n", filename);
+
+    if (source_count == 1) {
+        printf("%s\n", source_files[0]);
+    } else {
+        printf("%d files\n", source_count);
+        for (i = 0; i < source_count; i++) {
+            printf("  - %s\n", source_files[i]);
+        }
+    }
+
     printf("----------------------------------------\n");
 }
 
@@ -739,10 +1202,10 @@ void print_banner(const ColorCodes *colors, const char *filename)
  *
  * WHY: Summarize findings for the user with clear pass/fail
  *      indication and actionable fix suggestions.
+ *      Shows all source files when multiple files are used.
  */
 void print_summary(const ColorCodes *colors, const TestResult *result,
-                   int error_count, const DetectedError *errors,
-                   const char *source_file)
+                   int error_count, const DetectedError *errors)
 {
     char source_line[MAX_SOURCE_LINE];
     int i;
@@ -765,7 +1228,7 @@ void print_summary(const ColorCodes *colors, const TestResult *result,
             printf("%s\n", errors[i].fix_suggestion);
 
             if (errors[i].has_source && errors[i].source_line > 0 &&
-                get_source_line(source_file, errors[i].source_line,
+                get_source_line(errors[i].source_file, errors[i].source_line,
                                 source_line, sizeof(source_line)) == 0) {
                 print_colored(colors, colors->cyan, "  -> %d | ",
                               errors[i].source_line);
@@ -788,10 +1251,112 @@ void print_summary(const ColorCodes *colors, const TestResult *result,
 }
 
 /*
+ * generate_html_report - Write HTML report with error details
+ *
+ * WHY: Users need a shareable, styled report that shows errors,
+ *      source context, and fix suggestions in a web-friendly format.
+ *      Shows all source files when multiple files are used.
+ */
+int generate_html_report(const char *html_path, const char **source_files,
+                         int source_count, const TestResult *result,
+                         const DetectedError *errors, int error_count)
+{
+    FILE *fp;
+    char timestamp[64];
+    time_t now;
+    struct tm *tm_info;
+    int i;
+    const char *primary_source;
+
+    if (!html_path || !source_files || source_count <= 0 || !result)
+        return -1;
+
+    primary_source = source_files[0];
+
+    fp = fopen(html_path, "w");
+    if (!fp)
+        return -1;
+
+    now = time(NULL);
+    tm_info = localtime(&now);
+    strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
+
+    fprintf(fp, "<!DOCTYPE html>\n");
+    fprintf(fp, "<html>\n<head>\n");
+    fprintf(fp, "  <meta charset=\"utf-8\">\n");
+    fprintf(fp, "  <title>c_tester Report - %s</title>\n", primary_source);
+    fprintf(fp, "  <style>\n");
+    fprintf(fp, "    body { font-family: monospace; max-width: 800px; margin: 2em auto; padding: 0 1em; }\n");
+    fprintf(fp, "    h1 { border-bottom: 2px solid #333; padding-bottom: 0.5em; }\n");
+    fprintf(fp, "    .meta { color: #555; margin-bottom: 1.5em; }\n");
+    fprintf(fp, "    .error { border-left: 4px solid #e74c3c; padding: 1em; margin: 1em 0; background: #fef5f5; }\n");
+    fprintf(fp, "    .warning { border-left: 4px solid #f39c12; padding: 1em; margin: 1em 0; background: #fef9f0; }\n");
+    fprintf(fp, "    .clean { border-left: 4px solid #27ae60; padding: 1em; margin: 1em 0; background: #f0faf4; }\n");
+    fprintf(fp, "    .source-line { background: #f5f5f5; padding: 0.5em; margin: 0.5em 0; border-radius: 3px; overflow-x: auto; }\n");
+    fprintf(fp, "    .fix { color: #2c3e50; margin-top: 0.5em; }\n");
+    fprintf(fp, "    .status-ok { color: #27ae60; font-weight: bold; }\n");
+    fprintf(fp, "    .status-error { color: #e74c3c; font-weight: bold; }\n");
+    fprintf(fp, "  </style>\n");
+    fprintf(fp, "</head>\n<body>\n");
+    fprintf(fp, "  <h1>c_tester Report</h1>\n");
+    fprintf(fp, "  <p class=\"meta\">File(s): ");
+    for (i = 0; i < source_count; i++) {
+        fprintf(fp, "%s", source_files[i]);
+        if (i < source_count - 1) fprintf(fp, ", ");
+    }
+    fprintf(fp, " | Time: %ldms | Timestamp: %s | ",
+            result->execution_time_ms, timestamp);
+
+    if (error_count > 0) {
+        fprintf(fp, "<span class=\"status-error\">ERROR</span></p>\n");
+    } else if (result->compilation_success) {
+        fprintf(fp, "<span class=\"status-ok\">CLEAN</span></p>\n");
+    } else {
+        fprintf(fp, "<span class=\"status-error\">COMPILE ERROR</span></p>\n");
+    }
+
+    if (error_count > 0) {
+        for (i = 0; i < error_count; i++) {
+            const char *css_class = errors[i].severity == 2 ? "error" : "warning";
+            fprintf(fp, "  <div class=\"%s\">\n", css_class);
+            fprintf(fp, "    <h2>%s</h2>\n", errors[i].title);
+            fprintf(fp, "    <p class=\"fix\">Fix: %s</p>\n", errors[i].fix_suggestion);
+            if (errors[i].has_source && errors[i].source_line > 0) {
+                char source_line[MAX_SOURCE_LINE];
+                if (get_source_line(errors[i].source_file, errors[i].source_line,
+                                    source_line, sizeof(source_line)) == 0) {
+                    fprintf(fp, "    <pre class=\"source-line\">Line %d: %s</pre>\n",
+                            errors[i].source_line, source_line);
+                }
+            }
+            fprintf(fp, "  </div>\n");
+        }
+        fprintf(fp, "  <p class=\"status-error\">%d error(s) detected</p>\n", error_count);
+    } else if (result->compilation_success) {
+        fprintf(fp, "  <div class=\"clean\">\n");
+        fprintf(fp, "    <h2>No errors detected</h2>\n");
+        fprintf(fp, "    <p>Clean run completed in %ldms</p>\n", result->execution_time_ms);
+        fprintf(fp, "  </div>\n");
+    } else {
+        fprintf(fp, "  <div class=\"error\">\n");
+        fprintf(fp, "    <h2>Compilation Failed</h2>\n");
+        if (result->compiler_output[0]) {
+            fprintf(fp, "    <pre class=\"source-line\">%s</pre>\n", result->compiler_output);
+        }
+        fprintf(fp, "  </div>\n");
+    }
+
+    fprintf(fp, "</body>\n</html>\n");
+    fclose(fp);
+    return 0;
+}
+
+/*
  * main - CLI entry point for c_tester
  *
  * WHY: Parse command-line arguments, orchestrate the compilation,
  *      execution, and error reporting workflow.
+ *      Supports multiple source files compiled into a single binary.
  */
 int main(int argc, char *argv[])
 {
@@ -799,12 +1364,17 @@ int main(int argc, char *argv[])
     TestResult result;
     DetectedError errors[32];
     char binary_path[MAX_PATH_LEN];
-    const char *source_file = NULL;
+    const char *source_files[32];
+    int source_count = 0;
     bool keep_binary = false;
     bool use_color = true;
+    bool use_tsan = false;
+    bool use_valgrind = false;
+    const char *html_path = NULL;
     int timeout_sec = DEFAULT_TIMEOUT_SEC;
     int error_count = 0;
     int i;
+
     use_color = isatty(STDOUT_FILENO);
     init_colors(&colors, use_color);
 
@@ -818,58 +1388,112 @@ int main(int argc, char *argv[])
         } else if (strcmp(argv[i], "--no-color") == 0) {
             use_color = false;
             init_colors(&colors, use_color);
+        } else if (strcmp(argv[i], "--tsan") == 0) {
+            use_tsan = true;
+        } else if (strcmp(argv[i], "--valgrind") == 0) {
+            use_valgrind = true;
+        } else if (strncmp(argv[i], "--html=", 7) == 0) {
+            html_path = argv[i] + 7;
         } else if (argv[i][0] != '-') {
-            source_file = argv[i];
+            if (source_count < 32) {
+                source_files[source_count++] = argv[i];
+            }
         }
     }
 
-    if (!source_file) {
+    if (source_count == 0) {
         print_colored(&colors, colors.bold, "Usage: ");
-        printf("%s [options] <source.c>\n", argv[0]);
+        printf("%s [options] <source.c|source.cpp> [source2.c ...]\n", argv[0]);
         printf("\nOptions:\n");
         printf("  --keep         Keep compiled binary after run\n");
         printf("  --timeout=N    Set execution timeout in seconds (default: %d)\n",
-               DEFAULT_TIMEOUT_SEC);
+                DEFAULT_TIMEOUT_SEC);
         printf("  --no-color     Disable colored output\n");
+        printf("  --tsan         Compile with ThreadSanitizer for data race detection\n");
+        printf("  --valgrind     Run under Valgrind for memory error detection\n");
         return EXIT_USAGE_ERROR;
     }
 
-    if (!file_exists(source_file)) {
-        print_colored(&colors, colors.red, "Error: ");
-        printf("file not found: %s\n", source_file);
-        return EXIT_FILE_NOT_FOUND;
+    for (i = 0; i < source_count; i++) {
+        if (!file_exists(source_files[i])) {
+            print_colored(&colors, colors.red, "Error: ");
+            printf("file not found: %s\n", source_files[i]);
+            return EXIT_FILE_NOT_FOUND;
+        }
+
+        if (!is_source_file(source_files[i])) {
+            print_colored(&colors, colors.red, "Error: ");
+            printf("not a C/C++ source file: %s\n", source_files[i]);
+            return EXIT_USAGE_ERROR;
+        }
     }
 
-    if (!is_c_file(source_file)) {
-        print_colored(&colors, colors.red, "Error: ");
-        printf("not a C source file: %s\n", source_file);
-        return EXIT_USAGE_ERROR;
-    }
-
-    print_banner(&colors, source_file);
+    print_banner(&colors, source_files, source_count);
 
     generate_temp_path("c_tester", binary_path, sizeof(binary_path));
 
     memset(&result, 0, sizeof(result));
 
-    if (compile_with_sanitizers(source_file, binary_path,
-                                  result.compiler_output,
-                                  sizeof(result.compiler_output)) == 0) {
-        result.compilation_success = true;
-        /* Collect warnings that sanitizers suppress */
-        char warn_buf[MAX_OUTPUT_SIZE];
-        if (compile_for_warnings(source_file, warn_buf, sizeof(warn_buf)) == 0 &&
-            warn_buf[0] != '\0') {
-            size_t len = strlen(result.compiler_output);
-            if (len < sizeof(result.compiler_output) - 1) {
-                strncat(result.compiler_output, warn_buf,
-                        sizeof(result.compiler_output) - len - 1);
-            }
+    if (use_valgrind) {
+        if (compile_fallback(source_files, source_count, binary_path,
+                            result.compiler_output,
+                            sizeof(result.compiler_output)) == 0) {
+            result.compilation_success = true;
         }
-    } else if (compile_fallback(source_file, binary_path,
-                                 result.compiler_output,
-                                 sizeof(result.compiler_output)) == 0) {
-        result.compilation_success = true;
+    } else if (is_cpp_file(source_files[0])) {
+        if (use_tsan) {
+            if (compile_cpp_with_tsan(source_files, source_count, binary_path,
+                                           result.compiler_output,
+                                           sizeof(result.compiler_output)) == 0) {
+                result.compilation_success = true;
+            }
+        } else if (compile_cpp_with_sanitizers(source_files, source_count,
+                                                   binary_path,
+                                                   result.compiler_output,
+                                                   sizeof(result.compiler_output)) == 0) {
+            result.compilation_success = true;
+            char warn_buf[MAX_OUTPUT_SIZE];
+            if (compile_cpp_for_warnings(source_files, source_count,
+                                          warn_buf, sizeof(warn_buf)) == 0 &&
+                warn_buf[0] != '\0') {
+                size_t len = strlen(result.compiler_output);
+                if (len < sizeof(result.compiler_output) - 1) {
+                    strncat(result.compiler_output, warn_buf,
+                            sizeof(result.compiler_output) - len - 1);
+                }
+            }
+        } else if (compile_fallback(source_files, source_count, binary_path,
+                                       result.compiler_output,
+                                       sizeof(result.compiler_output)) == 0) {
+            result.compilation_success = true;
+        }
+    } else {
+        if (use_tsan) {
+            if (compile_with_tsan(source_files, source_count, binary_path,
+                                   result.compiler_output,
+                                   sizeof(result.compiler_output)) == 0) {
+                result.compilation_success = true;
+            }
+        } else if (compile_with_sanitizers(source_files, source_count,
+                                            binary_path,
+                                            result.compiler_output,
+                                            sizeof(result.compiler_output)) == 0) {
+            result.compilation_success = true;
+            char warn_buf[MAX_OUTPUT_SIZE];
+            if (compile_for_warnings(source_files, source_count,
+                                          warn_buf, sizeof(warn_buf)) == 0 &&
+                warn_buf[0] != '\0') {
+                size_t len = strlen(result.compiler_output);
+                if (len < sizeof(result.compiler_output) - 1) {
+                    strncat(result.compiler_output, warn_buf,
+                            sizeof(result.compiler_output) - len - 1);
+                }
+            }
+        } else if (compile_fallback(source_files, source_count, binary_path,
+                                       result.compiler_output,
+                                       sizeof(result.compiler_output)) == 0) {
+            result.compilation_success = true;
+        }
     }
 
     if (!result.compilation_success) {
@@ -882,14 +1506,23 @@ int main(int argc, char *argv[])
     struct timespec start_time, end_time;
     clock_gettime(CLOCK_MONOTONIC, &start_time);
 
-    setenv("ASAN_OPTIONS", "detect_leaks=1", 1);
+    if (use_valgrind) {
+        result.exit_code = run_with_valgrind(binary_path,
+                                                 result.runtime_output,
+                                                 sizeof(result.runtime_output),
+                                                 result.sanitizer_output,
+                                                 sizeof(result.sanitizer_output),
+                                                 timeout_sec, NULL);
+    } else {
+        setenv("ASAN_OPTIONS", "detect_leaks=1", 1);
 
-    result.exit_code = run_binary(binary_path, NULL,
-                                   result.runtime_output,
-                                   sizeof(result.runtime_output),
-                                   result.sanitizer_output,
-                                   sizeof(result.sanitizer_output),
-                                   timeout_sec, NULL);
+        result.exit_code = run_binary(binary_path, NULL,
+                                        result.runtime_output,
+                                        sizeof(result.runtime_output),
+                                        result.sanitizer_output,
+                                        sizeof(result.sanitizer_output),
+                                        timeout_sec, NULL);
+    }
 
     if (result.exit_code == -1) {
         snprintf(result.sanitizer_output, sizeof(result.sanitizer_output),
@@ -899,14 +1532,12 @@ int main(int argc, char *argv[])
     clock_gettime(CLOCK_MONOTONIC, &end_time);
     get_execution_time(&start_time, &end_time, &result.execution_time_ms);
 
-    /* Parse sanitizer errors */
     int sanitizer_count = parse_sanitizer_errors(result.sanitizer_output,
-                                                  errors + error_count,
-                                                  32 - error_count);
+                                                   errors + error_count,
+                                                   32 - error_count);
     error_count += sanitizer_count;
 
-    /* Only report compiler warnings when no sanitizer errors found */
-    if (error_count == 0 &&
+    if (error_count == 0 && !use_valgrind &&
         string_contains(result.compiler_output, "warning:")) {
         error_count = 1;
         if (string_contains(result.compiler_output, "uninitialized"))
@@ -944,20 +1575,28 @@ int main(int argc, char *argv[])
     if (error_count == 0 && result.exit_code != 0 &&
         result.exit_code != EXIT_CLEAN) {
         error_count = parse_signal_errors(result.sanitizer_output,
-                                           result.exit_code,
-                                           result.exit_code > 128 ?
-                                               result.exit_code - 128 : 0,
-                                           errors, 32);
+                                            result.exit_code,
+                                            result.exit_code > 128 ?
+                                                result.exit_code - 128 : 0,
+                                            errors, 32);
     }
 
-    /* Generate fix suggestions and get source context */
     for (i = 0; i < error_count; i++)
         generate_fix_suggestion(&errors[i]);
 
-    /* Print summary */
-    print_summary(&colors, &result, error_count, errors, source_file);
+    print_summary(&colors, &result, error_count, errors);
 
-    /* Cleanup */
+    if (html_path && html_path[0] != '\0') {
+        if (generate_html_report(html_path, source_files, source_count,
+                                  &result, errors, error_count) == 0) {
+            print_colored(&colors, colors.green, "[HTML] ");
+            printf("Report saved to: %s\n", html_path);
+        } else {
+            print_colored(&colors, colors.red, "[ERROR] ");
+            printf("Failed to write HTML report: %s\n", html_path);
+        }
+    }
+
     if (!keep_binary)
         cleanup_binary(binary_path);
 
