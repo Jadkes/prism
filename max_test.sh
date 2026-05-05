@@ -10,10 +10,10 @@ if [ -z "$1" ]; then
     echo "  - Default (ASan + UBSan)"
     echo "  - --analyzer (GCC static)"
     echo "  - --valgrind (deep memory)"
+    echo "  - --tsan (ThreadSanitizer)"
     echo ""
     echo "Examples:"
     echo "  $0 my_buggy.c"
-    echo "  $0 /path/to/problem.c"
     exit 1
 fi
 
@@ -71,18 +71,32 @@ else
 fi
 echo ""
 
+# --tsan
+echo "========================================"
+echo "[4] --TSAN (ThreadSanitizer)"
+echo "========================================"
+OUTPUT=$($C_TESTER $FILE --tsan 2>&1)
+if echo "$OUTPUT" | grep -q "\[ERROR\]"; then
+    echo "$OUTPUT" | grep -E "^\[ERROR\]|\[OK\]" | head -5
+    echo "$OUTPUT" | grep -E "Fix:" | head -3
+else
+    echo "$OUTPUT" | grep -E "^\[OK\]|\[COMPILE"
+fi
+echo ""
+
 # Summary
 echo "========================================"
 echo "  SUMMARY"
 echo "========================================"
 
 DETECTION=""
-for FLAG in "" "--analyzer" "--valgrind"; do
+for FLAG in "" "--analyzer" "--valgrind" "--tsan"; do
     OUTPUT=$($C_TESTER $FILE $FLAG 2>&1)
     if echo "$OUTPUT" | grep -q "\[ERROR\]"; then
         [ -z "$FLAG" ] && DETECTION="$DETECTION DEFAULT"
         [ "$FLAG" = "--analyzer" ] && DETECTION="$DETECTION --analyzer"
         [ "$FLAG" = "--valgrind" ] && DETECTION="$DETECTION --valgrind"
+        [ "$FLAG" = "--tsan" ] && DETECTION="$DETECTION --tsan"
     fi
 done
 
