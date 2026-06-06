@@ -2,7 +2,7 @@ CC = gcc
 CFLAGS = -Wall -Wextra -Wpedantic -O2 -Wno-format-truncation
 LDFLAGS = -lclang
 TARGET = c_tester
-OBJS = c_tester.o ast_backend.o
+OBJS = c_tester.o ast_backend.o annotation.o
 
 BAD_CODES_DIR = bad_codes
 HOOKS_DIR = hooks
@@ -19,6 +19,9 @@ c_tester.o: c_tester.c c_tester.h ast_backend.h
 
 ast_backend.o: ast_backend.c ast_backend.h c_tester.h
 	$(CC) $(CFLAGS) -Wno-stringop-truncation -c -o ast_backend.o ast_backend.c
+
+annotation.o: annotation.c annotation.h c_tester.h
+	$(CC) $(CFLAGS) -c -o annotation.o annotation.c
 
 clean:
 	rm -f $(TARGET)
