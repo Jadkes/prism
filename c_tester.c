@@ -317,7 +317,7 @@ int compile_cpp_with_tsan(const char **sources, int source_count,
     size_t pos;
 
     pos = snprintf(cmd, sizeof(cmd),
-                   "g++ -fsanitize=thread -g -fno-omit-frame-pointer "
+                   "g++ -fsanitize=thread -O2 -g -fno-omit-frame-pointer "
                    "-o '%s'", binary);
 
     for (i = 0; i < source_count && pos < sizeof(cmd) - 4; i++) {
@@ -1381,33 +1381,145 @@ void print_summary(const ColorCodes *colors, const TestResult *result,
     printf("\n");
 
     if (error_count > 0) {
+        /* Count errors by severity */
+        int critical = 0, severe = 0, warning = 0, info = 0;
         for (i = 0; i < error_count; i++) {
-            print_colored(colors, colors->red, "[ERROR] ");
+            if (errors[i].severity >= 3)      critical++;
+            else if (errors[i].severity == 2) severe++;
+            else if (errors[i].severity == 1) warning++;
+            else                              info++;
+        }
+
+        /* Print section header */
+        print_colored(colors, colors->bold,
+                      "╔════════════════════════════════════════╗\n");
+        print_colored(colors, colors->bold,
+                      "║         ANALYSIS RESULTS              ║\n");
+        print_colored(colors, colors->bold,
+                      "╚════════════════════════════════════════╝\n\n");
+
+        /* Print severity summary table */
+        print_colored(colors, colors->bold, "  Severity Summary:\n");
+        if (critical > 0) {
+            print_colored(colors, colors->red,
+                          "    🔴 CRITICAL : %d\n", critical);
+        }
+        if (severe > 0 || (critical == 0 && severe > 0)) {
+            print_colored(colors, colors->yellow,
+                          "    🟡 ERROR    : %d\n", severe);
+        }
+        if (warning > 0) {
+            print_colored(colors, colors->cyan,
+                          "    🟢 WARNING  : %d\n", warning);
+        }
+        if (info > 0) {
+            printf("    ⚪ INFO     : %d\n", info);
+        }
+        if (result->execution_time_ms > 0) {
+            printf("    ⏱ Time      : %ldms\n", result->execution_time_ms);
+        }
+        printf("\n");
+
+        /* Print detailed findings by severity */
+        print_colored(colors, colors->bold, "  Detailed Findings:\n");
+
+        /* First print CRITICAL errors */
+        for (i = 0; i < error_count; i++) {
+            if (errors[i].severity < 3) continue;
+            print_colored(colors, colors->red, "  ──[CRITICAL]── ");
             print_colored(colors, colors->bold, "%s", errors[i].title);
             if (errors[i].has_source && errors[i].source_line > 0)
                 printf(" (%s:%d)", errors[i].source_file,
                        errors[i].source_line);
             printf("\n");
 
-            print_colored(colors, colors->yellow, "  Fix: ");
+            print_colored(colors, colors->yellow, "     Fix: ");
             printf("%s\n", errors[i].fix_suggestion);
 
             if (errors[i].has_source && errors[i].source_line > 0 &&
                 get_source_line(errors[i].source_file, errors[i].source_line,
                                 source_line, sizeof(source_line)) == 0) {
-                print_colored(colors, colors->cyan, "  -> %d | ",
+                print_colored(colors, colors->cyan, "     -> %d | ",
                               errors[i].source_line);
                 printf("%s\n", source_line);
             }
             printf("\n");
         }
-        print_colored(colors, colors->red, "[ERROR] ");
-        printf("%d error(s) detected\n", error_count);
+
+        /* Then ERROR severity */
+        for (i = 0; i < error_count; i++) {
+            if (errors[i].severity != 2) continue;
+            print_colored(colors, colors->yellow, "  ──[ERROR]── ");
+            print_colored(colors, colors->bold, "%s", errors[i].title);
+            if (errors[i].has_source && errors[i].source_line > 0)
+                printf(" (%s:%d)", errors[i].source_file,
+                       errors[i].source_line);
+            printf("\n");
+
+            print_colored(colors, colors->yellow, "     Fix: ");
+            printf("%s\n", errors[i].fix_suggestion);
+
+            if (errors[i].has_source && errors[i].source_line > 0 &&
+                get_source_line(errors[i].source_file, errors[i].source_line,
+                                source_line, sizeof(source_line)) == 0) {
+                print_colored(colors, colors->cyan, "     -> %d | ",
+                              errors[i].source_line);
+                printf("%s\n", source_line);
+            }
+            printf("\n");
+        }
+
+        /* Then WARNING severity */
+        for (i = 0; i < error_count; i++) {
+            if (errors[i].severity != 1) continue;
+            print_colored(colors, colors->cyan, "  ──[WARNING]── ");
+            print_colored(colors, colors->bold, "%s", errors[i].title);
+            if (errors[i].has_source && errors[i].source_line > 0)
+                printf(" (%s:%d)", errors[i].source_file,
+                       errors[i].source_line);
+            printf("\n");
+
+            print_colored(colors, colors->yellow, "     Fix: ");
+            printf("%s\n", errors[i].fix_suggestion);
+
+            if (errors[i].has_source && errors[i].source_line > 0 &&
+                get_source_line(errors[i].source_file, errors[i].source_line,
+                                source_line, sizeof(source_line)) == 0) {
+                print_colored(colors, colors->cyan, "     -> %d | ",
+                              errors[i].source_line);
+                printf("%s\n", source_line);
+            }
+            printf("\n");
+        }
+
+        /* Then INFO severity */
+        for (i = 0; i < error_count; i++) {
+            if (errors[i].severity != 0) continue;
+            printf("  ──[INFO]── %s", errors[i].title);
+            if (errors[i].has_source && errors[i].source_line > 0)
+                printf(" (%s:%d)", errors[i].source_file,
+                       errors[i].source_line);
+            printf("\n");
+            printf("     %s\n", errors[i].fix_suggestion);
+            printf("\n");
+        }
+
+        /* Final summary line */
+        print_colored(colors, colors->bold,
+                      "  ─────────────────────────────────────────\n");
+        print_colored(colors, colors->red,
+                      "  %d error(s) detected", error_count);
+        if (result->execution_time_ms > 0)
+            printf(" in %ldms", result->execution_time_ms);
+        printf("\n");
+
     } else if (result->compilation_success) {
         print_colored(colors, colors->green, "[OK] ");
         print_colored(colors, colors->bold,
-                      "No errors detected - clean run in %ldms\n",
-                      result->execution_time_ms);
+                      "No errors detected");
+        if (result->execution_time_ms > 0)
+            printf(" — clean run in %ldms", result->execution_time_ms);
+        printf("\n");
     } else {
         print_colored(colors, colors->red, "[COMPILE ERROR]\n");
         if (result->compiler_output[0])
@@ -1816,7 +1928,7 @@ int run_max_analysis(const char **sources, int source_count,
     fflush(stdout);
 
     /* Check if valgrind is available before attempting */
-    if (system("which valgrind > /dev/null 2>&1") != 0) {
+    if (system("command -v valgrind > /dev/null 2>&1") != 0) {
         printf(" SKIPPED (valgrind not found)\n");
     } else {
         memset(result->compiler_output, 0, sizeof(result->compiler_output));
@@ -1946,23 +2058,41 @@ int run_max_analysis(const char **sources, int source_count,
  */
 void print_usage(const char *prog_name, const ColorCodes *colors)
 {
-    print_colored(colors, colors->bold, "c_tester - C Error Detection Tool\n");
+    print_colored(colors, colors->bold, "c_tester v1.4 - C Error Detection Tool\n");
     printf("Detects memory errors, undefined behavior, and bugs in C/C++ code.\n\n");
 
     print_colored(colors, colors->bold, "Usage: ");
     printf("%s [options] <source.c> [source2.c ...]\n\n", prog_name);
 
-    print_colored(colors, colors->bold, "Analysis:\n");
-    printf("  --max          Run ALL analysis modes (slow but thorough)\n");
+    print_colored(colors, colors->bold, "Analysis Modes:\n");
+    printf("  --quick        Quick check: -Wall -Werror, no sanitizers (default)\n");
+    printf("  --full         Full analysis with ASan+UBSan sanitizers\n");
+    printf("  --max          Run ALL analysis modes sequentially\n");
+    printf("  --ultra        Run ALL modes in parallel (uses all CPUs, very slow)\n");
     printf("  --tsan         Use ThreadSanitizer to detect data races\n");
     printf("  --analyzer     Use GCC static analyzer (-fanalyzer)\n");
     printf("  --clang-tidy   Run clang-tidy static analysis\n");
     printf("  --valgrind     Run under Valgrind for deep memory analysis\n");
-    printf("  --project=<file>   Use compile flags from compile_commands.json\n");
     printf("  --fuzz         Run with boundary fuzz inputs (empty, huge, neg)\n");
     printf("  --rerun=N      Run N times to detect non-deterministic bugs\n");
     printf("  --resources    Check for file descriptor / OS resource leaks\n");
-    printf("  --danger       Scan source for dangerous API calls\n\n");
+    printf("  --danger       Scan source for dangerous API calls\n");
+    printf("  --gcov         Run with code coverage instrumentation\n");
+    printf("  --libfuzzer    Run libFuzzer (requires clang + fuzz target)\n");
+    printf("  --gdb          On crash, automatically run GDB for backtrace\n");
+    printf("  --project=<file>  Use compile flags from compile_commands.json\n\n");
+
+    print_colored(colors, colors->bold, "Workflow:\n");
+    printf("  --cache        Enable incremental analysis caching\n");
+    printf("  --clear-cache  Clear the analysis cache\n");
+    printf("  --git-diff     Only analyze files changed since HEAD\n");
+    printf("  --git-bisect=<ref>  Git bisect to find which commit broke the code\n");
+    printf("  --install-hook Install git pre-commit hook (runs --quick --git-diff)\n");
+    printf("  --uninstall-hook  Remove git pre-commit hook\n\n");
+
+    print_colored(colors, colors->bold, "Suppression:\n");
+    printf("  --baseline=<file>  Load baseline, suppress known errors\n");
+    printf("  --generate-baseline  Save current errors as baseline\n\n");
 
     print_colored(colors, colors->bold, "Output:\n");
     printf("  --html=<path>  Generate HTML report at specified path\n");
@@ -1972,16 +2102,18 @@ void print_usage(const char *prog_name, const ColorCodes *colors)
     printf("  --keep         Keep compiled binary after run\n");
     printf("  --timeout=N    Set execution timeout in seconds (default: %d)\n",
            DEFAULT_TIMEOUT_SEC);
-    printf("  --jobs=N, -j N Process multiple files in parallel (max: 8)\n\n");
+    printf("  --jobs=N, -j N Process N files in parallel (default: nproc)\n");
+    printf("                 --ultra forces --jobs=nproc automatically\n\n");
 
     print_colored(colors, colors->bold, "Examples:\n");
-    printf("  %s main.c                          Basic error detection\n", prog_name);
-    printf("  %s --tsan main.c                   Detect data races\n", prog_name);
-    printf("  %s --valgrind main.c               Deep memory analysis\n", prog_name);
-    printf("  %s --html=report.html main.c       Generate HTML report\n", prog_name);
+    printf("  %s main.c                          Fast basic check (default)\n", prog_name);
+    printf("  %s --full main.c                   Full ASan+UBSan analysis\n", prog_name);
+    printf("  %s --ultra main.c                  Max analysis (slow)\n", prog_name);
+    printf("  %s --git-diff main.c               Only check changed files\n", prog_name);
+    printf("  %s --install-hook                  Install pre-commit hook\n", prog_name);
     printf("  %s main.c utils.c helper.c         Multi-file project\n\n", prog_name);
 
-     printf("Supported files: .c, .cpp, .cxx, .cc\n");
+    printf("Supported files: .c, .cpp, .cxx, .cc\n");
 }
 
 /*
@@ -2004,7 +2136,7 @@ int parse_compile_commands(const char *json_path, const char *source_file,
     size_t bytes_read;
 
     /* Check if jq is available */
-    if (system("which jq > /dev/null 2>&1") != 0) {
+    if (system("command -v jq > /dev/null 2>&1") != 0) {
         snprintf(flags_output, flags_size, "jq not found. Install jq to use compile_commands.json");
         return -1;
     }
@@ -2091,7 +2223,9 @@ int run_fuzz_analysis(const char *binary,
                       char *sanitizer_output, size_t sanitizer_size,
                       int timeout_sec)
 {
-    char large_buf[66000];
+    char buf_512[513];     /* 512B + null */
+    char buf_16k[16384];   /* 15871B + null */
+    char buf_64k[65536];   /* 65535B + null */
     int total_errors = 0;
     int input_count = 0;
     unsigned int error_modes[32] = {0};
@@ -2107,19 +2241,19 @@ int run_fuzz_analysis(const char *binary,
     inputs[input_count++] = "-2147483649";
 
     /* 512-byte input */
-    memset(large_buf, 'B', 512);
-    large_buf[512] = '\0';
-    inputs[input_count++] = large_buf;
+    memset(buf_512, 'B', 512);
+    buf_512[512] = '\0';
+    inputs[input_count++] = buf_512;
 
     /* 16KB ASan-friendly input */
-    memset(large_buf + 512, 'C', 15871);
-    large_buf[512 + 15871] = '\0';
-    inputs[input_count++] = large_buf;
+    memset(buf_16k, 'C', 15871);
+    buf_16k[15871] = '\0';
+    inputs[input_count++] = buf_16k;
 
     /* 64KB input (triggers typical stack/heap overflows) */
-    memset(large_buf, 'D', 65535);
-    large_buf[65535] = '\0';
-    inputs[input_count++] = large_buf;
+    memset(buf_64k, 'D', 65535);
+    buf_64k[65535] = '\0';
+    inputs[input_count++] = buf_64k;
 
     inputs[input_count] = NULL;
 
@@ -2130,32 +2264,49 @@ int run_fuzz_analysis(const char *binary,
         char run_err[MAX_OUTPUT_SIZE];
         DetectedError temp_errors[8];
         int count;
+        int exit_code;
 
         memset(run_out, 0, sizeof(run_out));
         memset(run_err, 0, sizeof(run_err));
         memset(temp_errors, 0, sizeof(temp_errors));
 
-        run_binary(binary, inputs[i],
+        exit_code = run_binary(binary, inputs[i],
                    run_out, sizeof(run_out),
                    run_err, sizeof(run_err),
                    timeout_sec, NULL);
 
-        count = parse_sanitizer_errors(run_err, temp_errors, 8);
-
-        if (count == 0 && strlen(run_err) > 0) {
-            /* Non-ASan crash — report as unknown */
-            temp_errors[0].type = ERR_SEG;
+        if (exit_code == -1) {
+            /* Timeout — report as separate error */
+            temp_errors[0].type = ERR_UNKNOWN;
             snprintf(temp_errors[0].title, sizeof(temp_errors[0].title),
-                     "Crash on fuzz input #%d", i + 1);
+                     "Timeout on fuzz input #%d", i + 1);
             snprintf(temp_errors[0].fix_suggestion,
                      sizeof(temp_errors[0].fix_suggestion),
-                     "The program crashed with input '%s'. Check for buffer "
-                     "overflows, integer overflows, or null dereferences "
+                     "The program timed out (>%ds) with input '%s'. "
+                     "Check for infinite loops or excessive processing time "
                      "caused by unusual input sizes.",
-                     inputs[i]);
-            temp_errors[0].severity = 3;
+                     timeout_sec, inputs[i]);
+            temp_errors[0].severity = 2;
             temp_errors[0].has_source = false;
             count = 1;
+        } else {
+            count = parse_sanitizer_errors(run_err, temp_errors, 8);
+
+            if (count == 0 && strlen(run_err) > 0) {
+                /* Non-ASan crash — report as unknown */
+                temp_errors[0].type = ERR_SEG;
+                snprintf(temp_errors[0].title, sizeof(temp_errors[0].title),
+                         "Crash on fuzz input #%d", i + 1);
+                snprintf(temp_errors[0].fix_suggestion,
+                         sizeof(temp_errors[0].fix_suggestion),
+                         "The program crashed with input '%s'. Check for buffer "
+                         "overflows, integer overflows, or null dereferences "
+                         "caused by unusual input sizes.",
+                         inputs[i]);
+                temp_errors[0].severity = 3;
+                temp_errors[0].has_source = false;
+                count = 1;
+            }
         }
 
         for (int j = 0; j < count && total_errors < max_errors; j++) {
@@ -2163,7 +2314,7 @@ int run_fuzz_analysis(const char *binary,
                                                  max_errors,
                                                  &temp_errors[j],
                                                  error_modes,
-                                                 1u << 0);
+                                                 1u << (i % 31));
         }
 
         /* Append fuzz run output to combined sanitizer buffer */
@@ -2227,6 +2378,7 @@ int run_with_rerun(const char *binary, int rerun_count,
             crash_count++;
             if (!have_error && run_err[0]) {
                 strncpy(first_error, run_err, sizeof(first_error) - 1);
+                first_error[sizeof(first_error) - 1] = '\0';
                 have_error = 1;
             }
         } else {
@@ -2254,7 +2406,29 @@ int run_with_rerun(const char *binary, int rerun_count,
     }
 
     if (all_same && crash_count > 0) {
-        return 0;  /* All crashed the same — deterministic bug */
+        /* All crashed identically — parse the first run's ASan output */
+        DetectedError det_errors[16];
+        int n = parse_sanitizer_errors(error_output, det_errors, 16);
+
+        if (n > 0) {
+            /* Return parsed sanitizer errors */
+            for (int i = 0; i < n && total < max_errors; i++) {
+                errors[total++] = det_errors[i];
+            }
+            return total;
+        }
+
+        /* No ASan output — report as generic deterministic crash */
+        snprintf(errors[0].title, sizeof(errors[0].title),
+                 "Deterministic Crash");
+        snprintf(errors[0].fix_suggestion, sizeof(errors[0].fix_suggestion),
+                 "Binary crashed in all %d runs. Run with --valgrind "
+                 "for deeper analysis.", rerun_count);
+        errors[0].severity = 3;
+        errors[0].has_source = false;
+        errors[0].type = ERR_SEG;
+        total = 1;
+        return total;
     }
 
     /* Variance detected — report heisenbug */
@@ -2263,11 +2437,25 @@ int run_with_rerun(const char *binary, int rerun_count,
         errors[idx].type = ERR_UNKNOWN;
         snprintf(errors[idx].title, sizeof(errors[idx].title),
                  "Non-deterministic Bug (heisenbug)");
-        snprintf(errors[idx].fix_suggestion, sizeof(errors[idx].fix_suggestion),
-                 "Crashed in %d/%d runs (timeout: %d, clean: %d). This "
-                 "indicates use-after-free, uninitialized memory, or a data "
-                 "race. Run with --valgrind or --tsan for deeper analysis.",
-                 crash_count, rerun_count, timeout_count, clean_count);
+        if (have_error) {
+            /* Truncate first_error to a single line for the suggestion */
+            char *nl = strchr(first_error, '\n');
+            if (nl) *nl = '\0';
+            /* Truncate first line if very long (fix_suggestion is small) */
+            first_error[255] = '\0';
+            snprintf(errors[idx].fix_suggestion,
+                     sizeof(errors[idx].fix_suggestion),
+                     "Crashed in %d/%d runs (timeout: %d, clean: %d). "
+                     "First crash: %s. Run with --valgrind for deeper analysis.",
+                     crash_count, rerun_count, timeout_count, clean_count,
+                     first_error);
+        } else {
+            snprintf(errors[idx].fix_suggestion,
+                     sizeof(errors[idx].fix_suggestion),
+                     "Crashed in %d/%d runs (timeout: %d, clean: %d). "
+                     "Run with --valgrind or --tsan for deeper analysis.",
+                     crash_count, rerun_count, timeout_count, clean_count);
+        }
         errors[idx].severity = 3;
         errors[idx].has_source = false;
         total = 1;
@@ -2286,32 +2474,44 @@ int run_with_rerun(const char *binary, int rerun_count,
 int check_resource_leaks(const char *binary,
                          DetectedError *errors, int max_errors,
                          char *sanitizer_output, size_t sanitizer_size,
-                         int timeout_sec __attribute__((unused)))
+                         int timeout_sec)
 {
     int found = 0;
 
-    if (system("which valgrind > /dev/null 2>&1") == 0) {
+    if (system("command -v valgrind > /dev/null 2>&1") == 0) {
         /* Valgrind track-fds mode */
-        char vg_cmd[4096];
+        char real_cmd[4096];
         char vg_output[MAX_OUTPUT_SIZE];
         FILE *pipe;
+        int exit_status;
 
-        snprintf(vg_cmd, sizeof(vg_cmd),
-                 "valgrind --track-fds=yes --leak-check=no --error-exitcode=0 "
-                 "--log-fd=3 '%s' 3>&1 2>&1",
-                 binary);
-
-        /* Use popen to run valgrind */
-        char real_cmd[4096];
-        snprintf(real_cmd, sizeof(real_cmd),
-                 "valgrind --track-fds=yes --leak-check=no --error-exitcode=0 '%s' 2>&1",
-                 binary);
+        /* Use timeout wrapper if timeout_sec > 0 */
+        if (timeout_sec > 0) {
+            snprintf(real_cmd, sizeof(real_cmd),
+                     "timeout %d valgrind --track-fds=yes --leak-check=no "
+                     "--error-exitcode=0 '%s' 2>&1",
+                     timeout_sec, binary);
+        } else {
+            snprintf(real_cmd, sizeof(real_cmd),
+                     "valgrind --track-fds=yes --leak-check=no "
+                     "--error-exitcode=0 '%s' 2>&1",
+                     binary);
+        }
 
         pipe = popen(real_cmd, "r");
         if (pipe) {
             size_t bytes = fread(vg_output, 1, sizeof(vg_output) - 1, pipe);
             vg_output[bytes] = '\0';
-            pclose(pipe);
+            exit_status = pclose(pipe);
+
+            /* Check that valgrind actually ran (exit_status=0 doesn't
+             * guarantee this, but non-zero means it definitely failed) */
+            if (exit_status != 0 && bytes == 0) {
+                snprintf(sanitizer_output, sanitizer_size,
+                         "valgrind failed (exit %d) for resource check",
+                         exit_status);
+                return 0;
+            }
 
             /* Copy to sanitizer_output for parsing */
             strncpy(sanitizer_output, vg_output, sanitizer_size - 1);
@@ -2331,7 +2531,7 @@ int check_resource_leaks(const char *binary,
                              "socket(), accept(), or dup() has a matching "
                              "close()/fclose() in all code paths.");
                     errors[found].severity = 2;
-                    errors[found].has_source = true;
+                    errors[found].has_source = false;
                     found++;
                 }
             }
@@ -2397,20 +2597,47 @@ int scan_dangerous_apis(const char **sources, int source_count,
          ERR_UNINIT_VAR, 1},
     };
     const int num_patterns = sizeof(patterns) / sizeof(patterns[0]);
-    char line_buf[1024];
+    const size_t line_buf_size = 65536;
+    char *line_buf = malloc(line_buf_size);
     int found = 0;
+
+    if (!line_buf) return 0;
 
     for (int f = 0; f < source_count && found < max_errors; f++) {
         FILE *fp = fopen(sources[f], "r");
         if (!fp) continue;
 
         int line_num = 0;
-        while (fgets(line_buf, sizeof(line_buf), fp) && found < max_errors) {
-            line_num++;
-            size_t len = strlen(line_buf);
-            /* Remove trailing newline for display */
-            if (len > 0 && line_buf[len - 1] == '\n')
-                line_buf[len - 1] = '\0';
+        /* Handle long lines that exceed the buffer by accumulating
+         * partial fgets reads until we reach a newline or EOF */
+        size_t acc_len = 0;
+        while (found < max_errors) {
+            if (!fgets(line_buf + acc_len, line_buf_size - acc_len, fp)) {
+                if (acc_len > 0) {
+                    /* Final unterminated segment — process it */
+                    line_num++;
+                } else {
+                    break;
+                }
+            } else {
+                size_t chunk = strlen(line_buf + acc_len);
+                acc_len += chunk;
+
+                if (acc_len > 0 && line_buf[acc_len - 1] == '\n') {
+                    /* Complete line (possibly from multiple fgets calls) */
+                    line_buf[acc_len - 1] = '\0';
+                    line_num++;
+                    acc_len = 0;
+                } else if (acc_len >= line_buf_size - 1) {
+                    /* Buffer full, no newline found — process what we have */
+                    line_buf[line_buf_size - 1] = '\0';
+                    line_num++;
+                    acc_len = 0;
+                } else {
+                    /* Partial read, line continues — loop for more */
+                    continue;
+                }
+            }
 
             for (int p = 0; p < num_patterns; p++) {
                 if (strstr(line_buf, patterns[p].func)) {
@@ -2419,9 +2646,9 @@ int scan_dangerous_apis(const char **sources, int source_count,
                     while (*trimmed == ' ' || *trimmed == '\t')
                         trimmed++;
                     if (trimmed[0] == '/' && trimmed[1] == '/')
-                        continue;
+                        break;
                     if (trimmed[0] == '/' && trimmed[1] == '*')
-                        continue;
+                        break;
 
                     errors[found].type = patterns[p].type;
                     snprintf(errors[found].title, sizeof(errors[found].title),
@@ -2442,8 +2669,1213 @@ int scan_dangerous_apis(const char **sources, int source_count,
         fclose(fp);
     }
 
+    free(line_buf);
+
     return found;
 }
+
+/*
+ * compile_with_basic_flags - Quick compile with -Wall -Wextra -Werror only
+ *
+ * WHY: --quick mode needs fast feedback without sanitizer overhead.
+ */
+int compile_with_basic_flags(const char **sources, int source_count,
+                              const char *binary,
+                              char *output, size_t output_size)
+{
+    char cmd[MAX_OUTPUT_SIZE];
+    FILE *pipe;
+    size_t bytes_read;
+    size_t pos;
+
+    if (is_cpp_file(sources[0])) {
+        pos = snprintf(cmd, sizeof(cmd),
+                       "g++ -Wall -Wextra -Werror -O2 -g -o '%s'", binary);
+    } else {
+        pos = snprintf(cmd, sizeof(cmd),
+                       "gcc -Wall -Wextra -Werror -O2 -g -o '%s'", binary);
+    }
+
+    for (int i = 0; i < source_count && pos < sizeof(cmd) - 4; i++) {
+        pos += snprintf(cmd + pos, sizeof(cmd) - pos, " '%s'", sources[i]);
+    }
+
+    pos += snprintf(cmd + pos, sizeof(cmd) - pos, " 2>&1");
+
+    pipe = popen(cmd, "r");
+    if (!pipe) return -1;
+
+    bytes_read = fread(output, 1, output_size - 1, pipe);
+    output[bytes_read] = '\0';
+    return pclose(pipe);
+}
+
+/*
+ * compute_source_hash - Compute MD5 hash of source file contents
+ *
+ * WHY: Used by --cache to detect source file changes.
+ *      Returns 0 on success with hash in hash_buf.
+ */
+int compute_source_hash(const char *source_file, char *hash_buf,
+                         size_t hash_buf_size)
+{
+    char cmd[4096];
+    FILE *pipe;
+
+    snprintf(cmd, sizeof(cmd), "md5sum '%s' 2>/dev/null", source_file);
+    pipe = popen(cmd, "r");
+    if (!pipe) return -1;
+
+    if (!fgets(hash_buf, hash_buf_size, pipe)) {
+        pclose(pipe);
+        return -1;
+    }
+    pclose(pipe);
+
+    /* Trim trailing "  filename" to get just the hex hash */
+    char *space = strchr(hash_buf, ' ');
+    if (space) *space = '\0';
+
+    return 0;
+}
+
+/*
+ * save_cache_entry - Save compilation result to cache
+ *
+ * WHY: Stores hashed compilation output so unchanged files don't recompile.
+ *      Cache is stored under ~/.cache/c_tester/<hash>.
+ */
+void save_cache_entry(const char *hash, bool success,
+                       const char *compiler_output)
+{
+    const char *home = getenv("HOME");
+    char cache_dir[MAX_PATH_LEN];
+    char cache_path[MAX_PATH_LEN + 64];
+    FILE *fp;
+
+    if (!home || !hash || !compiler_output) return;
+
+    snprintf(cache_dir, sizeof(cache_dir), "%s/.cache/c_tester", home);
+    snprintf(cache_path, sizeof(cache_path), "%s/%s", cache_dir, hash);
+
+    /* Create cache directory */
+    char mkdir_cmd[MAX_PATH_LEN + 64];
+    snprintf(mkdir_cmd, sizeof(mkdir_cmd), "mkdir -p '%s' 2>/dev/null", cache_dir);
+    system(mkdir_cmd);
+
+    fp = fopen(cache_path, "w");
+    if (!fp) return;
+
+    fprintf(fp, "%d\n%s", success ? 1 : 0, compiler_output);
+    fclose(fp);
+}
+
+/*
+ * load_cache_entry - Load cached compilation result
+ *
+ * WHY: Returns 0 and populates compiler_output if a valid cached
+ *      compilation exists for the given source hash.
+ */
+int load_cache_entry(const char *hash, bool *success,
+                      char *compiler_output, size_t output_size)
+{
+    const char *home = getenv("HOME");
+    char cache_path[MAX_PATH_LEN + 64];
+    FILE *fp;
+    int raw_success;
+
+    if (!home || !hash || !success) return -1;
+
+    snprintf(cache_path, sizeof(cache_path), "%s/.cache/c_tester/%s",
+             home, hash);
+
+    fp = fopen(cache_path, "r");
+    if (!fp) return -1;
+
+    if (fscanf(fp, "%d\n", &raw_success) != 1) {
+        fclose(fp);
+        return -1;
+    }
+
+    *success = (raw_success != 0);
+
+    size_t bytes = fread(compiler_output, 1, output_size - 1, fp);
+    compiler_output[bytes] = '\0';
+    fclose(fp);
+
+    return 0;
+}
+
+/*
+ * save_baseline - Save current errors as a baseline JSON file
+ *
+ * WHY: --generate-baseline creates a snapshot of known errors so that
+ *      future runs can suppress them and only report new issues.
+ */
+int save_baseline(const char *path, const DetectedError *errors,
+                   int error_count)
+{
+    FILE *fp = fopen(path, "w");
+    if (!fp) return -1;
+
+    fprintf(fp, "[\n");
+    for (int i = 0; i < error_count; i++) {
+        fprintf(fp, "  {\"type\":%d,\"title\":\"%s\",\"file\":\"%s\","
+                     "\"line\":%d,\"severity\":%d}%s\n",
+                (int)errors[i].type, errors[i].title,
+                errors[i].source_file, errors[i].source_line,
+                errors[i].severity,
+                i < error_count - 1 ? "," : "");
+    }
+    fprintf(fp, "]\n");
+    fclose(fp);
+    return 0;
+}
+
+/*
+ * load_baseline_and_filter - Load baseline and suppress matching errors
+ *
+ * WHY: --baseline=file.json removes known errors from the results,
+ *      leaving only NEW issues for the developer to address.
+ *      Mutates errors[] in place and returns the new error count.
+ */
+int load_baseline_and_filter(const char *path,
+                              DetectedError *errors, int *error_count)
+{
+    FILE *fp = fopen(path, "r");
+    if (!fp) return -1;
+
+    /* Read entire file into buffer */
+    char buf[65536];
+    size_t bytes = fread(buf, 1, sizeof(buf) - 1, fp);
+    buf[bytes] = '\0';
+    fclose(fp);
+
+    if (bytes < 2) return 0;
+
+    /* Simple JSON line-by-line scan for {type, file, line} */
+    int new_count = 0;
+    for (int i = 0; i < *error_count; i++) {
+        DetectedError *e = &errors[i];
+        char search_line[1024];
+        snprintf(search_line, sizeof(search_line),
+                 "\"type\":%d,\"file\":\"%s\",\"line\":%d",
+                 (int)e->type, e->source_file, e->source_line);
+
+        if (string_contains(buf, search_line)) {
+            /* Suppress this error */
+            continue;
+        }
+        /* Keep this error */
+        if (new_count != i)
+            errors[new_count] = errors[i];
+        new_count++;
+    }
+
+    *error_count = new_count;
+    return 0;
+}
+
+/*
+ * run_coverage_analysis - Compile and run with --gcov code coverage
+ *
+ * WHY: Shows which lines and branches are actually executed when
+ *      the binary is run under the test inputs.
+ */
+int run_coverage_analysis(const char *binary, const char **sources,
+                           int source_count, DetectedError *errors,
+                           int max_errors, char *output, size_t output_size,
+                           int timeout_sec)
+{
+    char cmd[4096];
+    FILE *pipe;
+    int found = 0;
+    const char *test_inputs[] = {"", "A", "test", "12345", "-1", "0", NULL};
+
+    /* Run binary with several inputs to generate .gcda files */
+    for (int i = 0; test_inputs[i]; i++) {
+        char run_out[MAX_OUTPUT_SIZE];
+        char run_err[MAX_OUTPUT_SIZE];
+        run_binary(binary, test_inputs[i],
+                   run_out, sizeof(run_out),
+                   run_err, sizeof(run_err),
+                   timeout_sec, NULL);
+    }
+
+    /* Run gcov on each source file */
+    for (int s = 0; s < source_count && found < max_errors; s++) {
+        snprintf(cmd, sizeof(cmd),
+                 "gcov -abc '%s' 2>&1", sources[s]);
+
+        char cov_output[65536];
+        pipe = popen(cmd, "r");
+        if (!pipe) continue;
+
+        size_t n = fread(cov_output, 1, sizeof(cov_output) - 1, pipe);
+        cov_output[n] = '\0';
+        pclose(pipe);
+
+        /* Append gcov output to our output buffer */
+        if (output) {
+            size_t slen = strlen(output);
+            if (slen + n + 64 < output_size) {
+                snprintf(output + slen, output_size - slen,
+                         "--- Coverage for %s ---\n%s\n", sources[s], cov_output);
+            }
+        }
+
+        /* Parse coverage percentages */
+        char *line = cov_output;
+        int lines_pct = -1, branches_pct = -1;
+
+        while (*line && found < max_errors) {
+            if (sscanf(line, "Lines executed:%d.%*d%% of %*d",
+                       &lines_pct) >= 1) {
+                /* Found line coverage */
+            } else if (sscanf(line, "Branches executed:%d.%*d%% of %*d",
+                              &branches_pct) >= 1) {
+                /* Found branch coverage */
+            }
+            /* Move to next line */
+            char *nl = strchr(line, '\n');
+            if (!nl) break;
+            line = nl + 1;
+        }
+
+        /* Report coverage as "errors" if below thresholds */
+        if (lines_pct >= 0 && lines_pct < 50 && found < max_errors) {
+            errors[found].type = ERR_UNKNOWN;
+            snprintf(errors[found].title, sizeof(errors[found].title),
+                     "Low Line Coverage: %d%%", lines_pct);
+            snprintf(errors[found].fix_suggestion,
+                     sizeof(errors[found].fix_suggestion),
+                     "Only %d%% of lines were executed. Add more test cases "
+                     "or fuzz inputs to improve coverage.",
+                     lines_pct);
+            errors[found].severity = 1;
+            errors[found].has_source = true;
+            strncpy(errors[found].source_file, sources[s],
+                    sizeof(errors[found].source_file) - 1);
+            errors[found].source_line = 0;
+            found++;
+        }
+    }
+
+    /* Clean up .gcda and .gcno files */
+    snprintf(cmd, sizeof(cmd), "rm -f *.gcda *.gcno *.gcov 2>/dev/null");
+    system(cmd);
+
+    return found;
+}
+
+/*
+ * run_libfuzzer_analysis - Compile and run with libFuzzer
+ *
+ * WHY: libFuzzer performs coverage-guided mutation fuzzing to find
+ *      crashes that simple boundary testing misses. Requires clang
+ *      and a LLVMFuzzerTestOneInput() function in the source.
+ */
+int run_libfuzzer_analysis(const char **sources, int source_count,
+                            DetectedError *errors, int max_errors,
+                            char *output, size_t output_size,
+                            int timeout_sec)
+{
+    char cmd[MAX_PATH_LEN * 2 + 256];
+    char fuzz_out[65536];
+    FILE *pipe;
+    int found = 0;
+    char binary_path[MAX_PATH_LEN];
+
+    /* Check for clang */
+    if (system("command -v clang > /dev/null 2>&1") != 0) {
+        if (output)
+            snprintf(output, output_size,
+                     "libFuzzer requires clang (not found). "
+                     "Install clang from https://clang.llvm.org/");
+        return -1;
+    }
+
+    /* Check that at least one source has LLVMFuzzerTestOneInput */
+    bool has_fuzz_target = false;
+    for (int i = 0; i < source_count; i++) {
+        char grep_cmd[4096];
+        snprintf(grep_cmd, sizeof(grep_cmd),
+                 "grep -q 'LLVMFuzzerTestOneInput' '%s' 2>/dev/null",
+                 sources[i]);
+        if (system(grep_cmd) == 0) {
+            has_fuzz_target = true;
+            break;
+        }
+    }
+
+    if (!has_fuzz_target) {
+        if (output)
+            snprintf(output, output_size,
+                     "No LLVMFuzzerTestOneInput() found in sources. "
+                     "Define one to use libFuzzer.");
+        return -1;
+    }
+
+    /* Generate temp binary path */
+    generate_temp_path("c_tester_fuzz", binary_path, sizeof(binary_path));
+
+    /* Compile with libFuzzer + ASan */
+    size_t pos = snprintf(cmd, sizeof(cmd),
+                          "clang -fsanitize=fuzzer,address -g -O1 "
+                          "-o '%s'", binary_path);
+
+    for (int i = 0; i < source_count && pos < sizeof(cmd) - 4; i++) {
+        pos += snprintf(cmd + pos, sizeof(cmd) - pos, " '%s'", sources[i]);
+    }
+
+    pos += snprintf(cmd + pos, sizeof(cmd) - pos, " 2>&1");
+
+    pipe = popen(cmd, "r");
+    if (pipe) {
+        size_t n = fread(fuzz_out, 1, sizeof(fuzz_out) - 1, pipe);
+        fuzz_out[n] = '\0';
+        int compile_status = pclose(pipe);
+
+        if (compile_status != 0) {
+            if (output)
+                snprintf(output, output_size,
+                         "libFuzzer compilation failed:\n%s", fuzz_out);
+            unlink(binary_path);
+            return -1;
+        }
+    } else {
+        unlink(binary_path);
+        return -1;
+    }
+
+    /* Run libFuzzer with timeout */
+    snprintf(cmd, sizeof(cmd),
+             "timeout %d '%s' -max_total_time=%d -print_final_stats=1 2>&1",
+             timeout_sec, binary_path, timeout_sec);
+
+    pipe = popen(cmd, "r");
+    if (!pipe) {
+        unlink(binary_path);
+        return -1;
+    }
+
+    size_t n = fread(fuzz_out, 1, sizeof(fuzz_out) - 1, pipe);
+    fuzz_out[n] = '\0';
+    pclose(pipe);
+
+    /* Copy output */
+    if (output)
+        snprintf(output, output_size, "%s", fuzz_out);
+
+    /* Parse for crashes */
+    if (string_contains(fuzz_out, "SUMMARY:") && found < max_errors) {
+        errors[found].type = ERR_SEG;
+        snprintf(errors[found].title, sizeof(errors[found].title),
+                 "libFuzzer Found Crash");
+        snprintf(errors[found].fix_suggestion,
+                 sizeof(errors[found].fix_suggestion),
+                 "libFuzzer detected a crash during fuzzing. "
+                 "Check the crash input in the current directory.");
+        errors[found].severity = 3;
+        errors[found].has_source = false;
+        found++;
+    }
+
+    /* Clean up */
+    unlink(binary_path);
+
+    return found;
+}
+
+/*
+ * run_ultra_analysis - MAX on steroids — every mode, trick, and flag
+ *
+ * WHY: --ultra compiles at 4+ optimization levels, with every sanitizer
+ *      variant, both strict-aliasing modes, hardened flags, gcov, and
+ *      clang MSan. It then runs 20+ analysis passes in parallel:
+ *      boundary fuzz, random fuzz, rerun for flaky detection, Valgrind,
+ *      TSan, UBSan at every variant, GCC analyzer, clang-tidy, warnings,
+ *      coverage, danger scan, and resource-leak checking.
+ *
+ *      Each pass writes results to a temp file. The parent collects and
+ *      deduplicates. Gcov artifacts cleaned up at the end.
+ */
+
+/* Ultra compile variants (flags and compilers) */
+struct ultra_compile_var {
+    const char *p_name;
+    const char *compiler;
+    const char *flags;
+    bool is_cpp_target;
+};
+
+static const struct ultra_compile_var ultra_variants[] = {
+    /* 0  */ {"ASan+UBSan -O2",          "gcc", "-fsanitize=address,undefined -O2 -g", false},
+    /* 1  */ {"ASan+UBSan -O0",          "gcc", "-fsanitize=address,undefined -O0 -g", false},
+    /* 2  */ {"ASan+UBSan -Os",          "gcc", "-fsanitize=address,undefined -Os -g", false},
+    /* 3  */ {"Full UBSan -O1",          "gcc", "-fsanitize=undefined,shift,integer-divide-by-zero,null,alignment,object-size,float-divide-by-zero,float-cast-overflow,signed-integer-overflow,bounds,pointer-overflow -O1 -g -fno-sanitize-recover=all", false},
+    /* 4  */ {"Hardened -O2",            "gcc", "-fsanitize=address,undefined -O2 -g -D_FORTIFY_SOURCE=3 -fstack-protector-strong -fstack-clash-protection -fcf-protection=full", false},
+    /* 5  */ {"StrictAlias -O2",         "gcc", "-fsanitize=address,undefined -O2 -g -fstrict-aliasing -Wstrict-aliasing=3", false},
+    /* 6  */ {"Valgrind -O0",            "gcc", "-O0 -g", false},
+    /* 7  */ {"TSan -O2",                "gcc", "-fsanitize=thread -O2 -g -fno-omit-frame-pointer", false},
+    /* 8  */ {"GCov -O0",                "gcc", "--coverage -O0 -g", false},
+    /* 9  */ {"Analyzer -fanalyzer",     "gcc", "-fanalyzer -O1 -g", false},
+    /* 10 */ {"ASan+UBSan -O1 C++",     "g++", "-fsanitize=address,undefined -O1 -g", true},
+};
+#define ULTRA_NUM_VARIANTS 11
+
+/*
+ * ultra_find_binary - Find first binary whose variant name contains tag
+ */
+static const char *ultra_find_binary(const struct ultra_compile_var *variants,
+                                      int num, const char *binary_paths[],
+                                      const bool *success, const char *tag)
+{
+    for (int i = 0; i < num; i++) {
+        if (success[i] && variants[i].p_name &&
+            strstr(variants[i].p_name, tag)) {
+            return binary_paths[i];
+        }
+    }
+    return NULL;
+}
+
+int run_ultra_analysis(const char **sources, int source_count,
+                        DetectedError *errors, int max_errors,
+                        int timeout_sec, const ColorCodes *colors)
+{
+    int total_errors = 0;
+    unsigned int error_modes[32] = {0};
+    bool is_cpp = is_cpp_file(sources[0]);
+
+    /* ─── Compilation Wave (all binaries built in parallel) ─── */
+    int num_var = ULTRA_NUM_VARIANTS;
+    char *binary_paths[ULTRA_NUM_VARIANTS];
+    pid_t compile_pids[ULTRA_NUM_VARIANTS];
+    bool compile_ok[ULTRA_NUM_VARIANTS];
+    int num_to_compile = 0;
+
+    memset(binary_paths, 0, sizeof(binary_paths));
+    memset(compile_pids, 0, sizeof(compile_pids));
+    memset(compile_ok, 0, sizeof(compile_ok));
+
+    /* Generate binary paths and count active compilations */
+    for (int i = 0; i < num_var; i++) {
+        if (is_cpp != ultra_variants[i].is_cpp_target) continue;
+        binary_paths[i] = malloc(MAX_PATH_LEN);
+        if (!binary_paths[i]) continue;
+        generate_temp_path("c_tester_ultra", binary_paths[i], MAX_PATH_LEN);
+        num_to_compile++;
+    }
+
+    if (colors) {
+        print_colored(colors, colors->cyan, "[ultra] ");
+        printf("Phase 1: %d binaries needed, compiling...\n", num_to_compile);
+        fflush(stdout);
+    }
+
+    /* Fork compile children */
+    for (int i = 0; i < num_var; i++) {
+        if (is_cpp != ultra_variants[i].is_cpp_target) continue;
+        if (!binary_paths[i]) continue;
+
+        pid_t pid = fork();
+        if (pid == 0) {
+            char cmd[16384];
+            size_t pos = snprintf(cmd, sizeof(cmd), "%s %s -o '%s'",
+                                  ultra_variants[i].compiler,
+                                  ultra_variants[i].flags,
+                                  binary_paths[i]);
+            for (int s = 0; s < source_count && pos < sizeof(cmd) - 4; s++)
+                pos += snprintf(cmd + pos, sizeof(cmd) - pos, " '%s'", sources[s]);
+            pos += snprintf(cmd + pos, sizeof(cmd) - pos, " 2>&1");
+            FILE *pp = popen(cmd, "r");
+            if (pp) {
+                char buf[4096];
+                while (fgets(buf, sizeof(buf), pp)) {}
+                pclose(pp);
+            }
+            _exit(access(binary_paths[i], X_OK) == 0 ? 0 : 1);
+        } else if (pid > 0) {
+            compile_pids[i] = pid;
+        }
+    }
+
+    /* Wait for all compilations */
+    int compile_success_count = 0;
+    for (int i = 0; i < num_var; i++) {
+        if (is_cpp != ultra_variants[i].is_cpp_target) continue;
+        if (!compile_pids[i]) continue;
+        int status;
+        waitpid(compile_pids[i], &status, 0);
+        compile_ok[i] = (WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        if (compile_ok[i]) compile_success_count++;
+    }
+
+    if (colors) {
+        print_colored(colors, colors->cyan, "[ultra] ");
+        printf("Phase 2: %d/%d compiled — launching 22 analysis passes...\n",
+               compile_success_count, num_to_compile);
+        fflush(stdout);
+    }
+
+    /* ─── Analysis Wave: each pass runs in a forked child,
+     *     writes results to a temp file, parent collects ─── */
+#define MAX_ANALYSIS_PASSES 24
+    struct {
+        pid_t pid;
+        char result_file[MAX_PATH_LEN];
+    } analysis_passes[MAX_ANALYSIS_PASSES];
+    int num_analysis = 0;
+    memset(analysis_passes, 0, sizeof(analysis_passes));
+
+    for (int i = 0; i < MAX_ANALYSIS_PASSES; i++) {
+        snprintf(analysis_passes[i].result_file, sizeof(analysis_passes[i].result_file),
+                 "/tmp/c_tester_ultra_ap_%d_%d", (int)getpid(), i);
+    }
+
+    /* Helper to find a binary path by tag */
+#define ULTRA_BIN(tag) ultra_find_binary(ultra_variants, num_var, \
+                                          (const char **)binary_paths, \
+                                          (const bool *)compile_ok, (tag))
+
+    /* Helper to write results from child process — structured data only */
+#define ULTRA_CHILD_RESULT(var_lo, var_lc, var_le) do { \
+        (void)var_lo; \
+        fprintf(rfp, "%d\n", var_lc); \
+        for (int jj = 0; jj < var_lc && jj < 16; jj++) \
+            fprintf(rfp, "%d|%s|%s|%d|%d|%d\n", \
+                    (int)var_le[jj].type, var_le[jj].title, \
+                    var_le[jj].fix_suggestion, \
+                    var_le[jj].source_line, var_le[jj].severity, \
+                    var_le[jj].has_source ? 1 : 0); \
+    } while(0)
+
+    /* 1. ASan + UBSan -O2 runtime */
+    {
+        pid_t pid = fork();
+        if (pid == 0) {
+            FILE *rfp = fopen(analysis_passes[num_analysis].result_file, "w");
+            if (!rfp) _exit(0);
+            DetectedError le[16]; memset(le,0,sizeof(le)); int lc=0; char lo[65536]={0};
+            const char *b = ULTRA_BIN("ASan+UBSan -O2");
+            if (b) {
+                setenv("ASAN_OPTIONS","detect_leaks=1:detect_stack_use_after_return=1:strict_string_checks=1:detect_invalid_pointer_pairs=2:check_initialization_order=1",1);
+                char r_out[65536], r_err[65536];
+                run_binary(b, NULL, r_out,sizeof(r_out), r_err,sizeof(r_err), timeout_sec, NULL);
+                lc = parse_sanitizer_errors(r_err, le, 16);
+                snprintf(lo, sizeof(lo), "%s", r_err);
+            }
+            ULTRA_CHILD_RESULT(lo,lc,le); fclose(rfp); _exit(0);
+        }
+        if (pid > 0) { analysis_passes[num_analysis].pid=pid; num_analysis++; }
+    }
+
+    /* 2. ASan+UBSan -O0 runtime (optimization-dependent bugs) */
+    {
+        pid_t pid = fork();
+        if (pid == 0) {
+            FILE *rfp = fopen(analysis_passes[num_analysis].result_file, "w");
+            if (!rfp) _exit(0);
+            DetectedError le[16]; memset(le,0,sizeof(le)); int lc=0; char lo[65536]={0};
+            const char *b = ULTRA_BIN("ASan+UBSan -O0");
+            if (b) {
+                setenv("ASAN_OPTIONS","detect_leaks=1:detect_stack_use_after_return=1",1);
+                char r_out[65536], r_err[65536];
+                run_binary(b, NULL, r_out,sizeof(r_out), r_err,sizeof(r_err), timeout_sec, NULL);
+                lc = parse_sanitizer_errors(r_err, le, 16);
+                snprintf(lo, sizeof(lo), "%s", r_err);
+            }
+            ULTRA_CHILD_RESULT(lo,lc,le); fclose(rfp); _exit(0);
+        }
+        if (pid > 0) { analysis_passes[num_analysis].pid=pid; num_analysis++; }
+    }
+
+    /* 3. Full UBSan -O1 (extra UB checks: shift, align, wrap, bounds) */
+    {
+        pid_t pid = fork();
+        if (pid == 0) {
+            FILE *rfp = fopen(analysis_passes[num_analysis].result_file, "w");
+            if (!rfp) _exit(0);
+            DetectedError le[16]; memset(le,0,sizeof(le)); int lc=0; char lo[65536]={0};
+            const char *b = ULTRA_BIN("Full UBSan");
+            if (b) {
+                setenv("UBSAN_OPTIONS","print_stacktrace=1:halt_on_error=0",1);
+                setenv("ASAN_OPTIONS","detect_leaks=1",1);
+                char r_out[65536], r_err[65536];
+                run_binary(b, NULL, r_out,sizeof(r_out), r_err,sizeof(r_err), timeout_sec, NULL);
+                lc = parse_sanitizer_errors(r_err, le, 16);
+                snprintf(lo, sizeof(lo), "%s", r_err);
+            }
+            ULTRA_CHILD_RESULT(lo,lc,le); fclose(rfp); _exit(0);
+        }
+        if (pid > 0) { analysis_passes[num_analysis].pid=pid; num_analysis++; }
+    }
+
+    /* 4. Hardened runtime (fortify + stack protection) */
+    {
+        pid_t pid = fork();
+        if (pid == 0) {
+            FILE *rfp = fopen(analysis_passes[num_analysis].result_file, "w");
+            if (!rfp) _exit(0);
+            DetectedError le[16]; memset(le,0,sizeof(le)); int lc=0; char lo[65536]={0};
+            const char *b = ULTRA_BIN("Hardened");
+            if (b) {
+                setenv("ASAN_OPTIONS","detect_leaks=1:detect_stack_use_after_return=1",1);
+                char r_out[65536], r_err[65536];
+                run_binary(b, NULL, r_out,sizeof(r_out), r_err,sizeof(r_err), timeout_sec, NULL);
+                lc = parse_sanitizer_errors(r_err, le, 16);
+                snprintf(lo, sizeof(lo), "%s", r_err);
+            }
+            ULTRA_CHILD_RESULT(lo,lc,le); fclose(rfp); _exit(0);
+        }
+        if (pid > 0) { analysis_passes[num_analysis].pid=pid; num_analysis++; }
+    }
+
+    /* 5. StrictAlias runtime (type-punning detection) */
+    {
+        pid_t pid = fork();
+        if (pid == 0) {
+            FILE *rfp = fopen(analysis_passes[num_analysis].result_file, "w");
+            if (!rfp) _exit(0);
+            DetectedError le[16]; memset(le,0,sizeof(le)); int lc=0; char lo[65536]={0};
+            const char *b = ULTRA_BIN("StrictAlias");
+            if (b) {
+                setenv("ASAN_OPTIONS","detect_leaks=1",1);
+                char r_out[65536], r_err[65536];
+                run_binary(b, NULL, r_out,sizeof(r_out), r_err,sizeof(r_err), timeout_sec, NULL);
+                lc = parse_sanitizer_errors(r_err, le, 16);
+                snprintf(lo, sizeof(lo), "%s", r_err);
+            }
+            ULTRA_CHILD_RESULT(lo,lc,le); fclose(rfp); _exit(0);
+        }
+        if (pid > 0) { analysis_passes[num_analysis].pid=pid; num_analysis++; }
+    }
+
+    /* 6. ASan+UBSan -Os runtime (size-optimized code paths) */
+    {
+        pid_t pid = fork();
+        if (pid == 0) {
+            FILE *rfp = fopen(analysis_passes[num_analysis].result_file, "w");
+            if (!rfp) _exit(0);
+            DetectedError le[16]; memset(le,0,sizeof(le)); int lc=0; char lo[65536]={0};
+            const char *b = ULTRA_BIN("ASan+UBSan -Os");
+            if (b) {
+                setenv("ASAN_OPTIONS","detect_leaks=1",1);
+                char r_out[65536], r_err[65536];
+                run_binary(b, NULL, r_out,sizeof(r_out), r_err,sizeof(r_err), timeout_sec, NULL);
+                lc = parse_sanitizer_errors(r_err, le, 16);
+                snprintf(lo, sizeof(lo), "%s", r_err);
+            }
+            ULTRA_CHILD_RESULT(lo,lc,le); fclose(rfp); _exit(0);
+        }
+        if (pid > 0) { analysis_passes[num_analysis].pid=pid; num_analysis++; }
+    }
+
+    /* 7. Valgrind Memcheck (deep memory analysis) */
+    {
+        pid_t pid = fork();
+        if (pid == 0) {
+            FILE *rfp = fopen(analysis_passes[num_analysis].result_file, "w");
+            if (!rfp) _exit(0);
+            DetectedError le[16]; memset(le,0,sizeof(le)); int lc=0; char lo[65536]={0};
+            const char *b = ULTRA_BIN("Valgrind");
+            if (b) {
+                char vg_out[65536], vg_err[65536];
+                run_with_valgrind(b, vg_out,sizeof(vg_out), vg_err,sizeof(vg_err), timeout_sec, NULL);
+                lc = parse_sanitizer_errors(vg_err, le, 16);
+                snprintf(lo, sizeof(lo), "%s", vg_err);
+            }
+            ULTRA_CHILD_RESULT(lo,lc,le); fclose(rfp); _exit(0);
+        }
+        if (pid > 0) { analysis_passes[num_analysis].pid=pid; num_analysis++; }
+    }
+
+    /* 8. Valgrind resource leak check (--track-fds) */
+    {
+        pid_t pid = fork();
+        if (pid == 0) {
+            FILE *rfp = fopen(analysis_passes[num_analysis].result_file, "w");
+            if (!rfp) _exit(0);
+            DetectedError le[16]; memset(le,0,sizeof(le)); int lc=0; char lo[65536]={0};
+            const char *b = ULTRA_BIN("Valgrind");
+            if (b) {
+                char cmd[8192];
+                snprintf(cmd,sizeof(cmd),
+                         "timeout %d valgrind --tool=memcheck --track-fds=yes --leak-check=full '%s' 2>&1 </dev/null",
+                         timeout_sec, b);
+                FILE *pp = popen(cmd,"r");
+                if (pp) {
+                    size_t n = fread(lo,1,sizeof(lo)-1,pp); lo[n]='\0'; pclose(pp);
+                }
+                if (string_contains(lo,"Open file descriptor") ||
+                    string_contains(lo,"definitely lost") ||
+                    string_contains(lo,"indirectly lost")) {
+                    le[lc].type = ERR_UNKNOWN;
+                    snprintf(le[lc].title,sizeof(le[lc].title),"Resource Leak / Memory Leak");
+                    snprintf(le[lc].fix_suggestion,sizeof(le[lc].fix_suggestion),
+                             "Valgrind detected open FDs or leaked memory — ensure all "
+                             "malloc() has matching free() and all FDs are closed.");
+                    le[lc].severity=2; le[lc].has_source=false; lc++;
+                }
+            }
+            ULTRA_CHILD_RESULT(lo,lc,le); fclose(rfp); _exit(0);
+        }
+        if (pid > 0) { analysis_passes[num_analysis].pid=pid; num_analysis++; }
+    }
+
+    /* 9. TSan (data races via ThreadSanitizer) */
+    {
+        pid_t pid = fork();
+        if (pid == 0) {
+            FILE *rfp = fopen(analysis_passes[num_analysis].result_file, "w");
+            if (!rfp) _exit(0);
+            DetectedError le[16]; memset(le,0,sizeof(le)); int lc=0; char lo[65536]={0};
+            const char *b = ULTRA_BIN("TSan");
+            if (b) {
+                setenv("TSAN_OPTIONS","report_atomic_races=1:halt_on_error=0",1);
+                char tsan_out[65536], tsan_err[65536];
+                run_binary(b, NULL, tsan_out,sizeof(tsan_out), tsan_err,sizeof(tsan_err), timeout_sec, NULL);
+                lc = parse_sanitizer_errors(tsan_err, le, 16);
+                snprintf(lo, sizeof(lo), "%s", tsan_err);
+            }
+            ULTRA_CHILD_RESULT(lo,lc,le); fclose(rfp); _exit(0);
+        }
+        if (pid > 0) { analysis_passes[num_analysis].pid=pid; num_analysis++; }
+    }
+
+    /* 10. Compiler warnings (-Wall -Wextra -Wpedantic) */
+    {
+        pid_t pid = fork();
+        if (pid == 0) {
+            FILE *rfp = fopen(analysis_passes[num_analysis].result_file, "w");
+            if (!rfp) _exit(0);
+            DetectedError le[16]; memset(le,0,sizeof(le)); int lc=0; char lo[65536]={0};
+            char warn_out[MAX_OUTPUT_SIZE];
+            int warn_ret;
+            if (is_cpp_file(sources[0]))
+                warn_ret = compile_cpp_for_warnings(sources,source_count,
+                                 warn_out,sizeof(warn_out));
+            else
+                warn_ret = compile_for_warnings(sources,source_count,
+                             warn_out,sizeof(warn_out));
+            (void)warn_ret;
+            char *save;
+            char *line = strtok_r(warn_out,"\n",&save);
+            while (line && lc < 16) {
+                if (string_contains(line,"warning:")) {
+                    int pat = classify_error(line);
+                    if (pat >= 0) {
+                        le[lc].type = error_patterns[pat].type;
+                        snprintf(le[lc].title,sizeof(le[lc].title),"%s",error_patterns[pat].title);
+                        snprintf(le[lc].fix_suggestion,sizeof(le[lc].fix_suggestion),"%s",error_patterns[pat].fix);
+                        le[lc].severity = error_patterns[pat].severity;
+                        le[lc].has_source = false; lc++;
+                    }
+                }
+                line = strtok_r(NULL,"\n",&save);
+            }
+            snprintf(lo,sizeof(lo),"%s",warn_out);
+            ULTRA_CHILD_RESULT(lo,lc,le); fclose(rfp); _exit(0);
+        }
+        if (pid > 0) { analysis_passes[num_analysis].pid=pid; num_analysis++; }
+    }
+
+    /* 11. GCC -fanalyzer static analysis */
+    {
+        pid_t pid = fork();
+        if (pid == 0) {
+            FILE *rfp = fopen(analysis_passes[num_analysis].result_file, "w");
+            if (!rfp) _exit(0);
+            DetectedError le[16]; memset(le,0,sizeof(le)); int lc=0; char lo[65536]={0};
+            char analyze_out[MAX_OUTPUT_SIZE];
+            if (is_cpp_file(sources[0]))
+                compile_cpp_with_analyzer(sources,source_count,"/dev/null",
+                    analyze_out,sizeof(analyze_out));
+            else
+                compile_with_analyzer(sources,source_count,"/dev/null",
+                    analyze_out,sizeof(analyze_out));
+            lc = parse_sanitizer_errors(analyze_out,le,16);
+            snprintf(lo,sizeof(lo),"%s",analyze_out);
+            ULTRA_CHILD_RESULT(lo,lc,le); fclose(rfp); _exit(0);
+        }
+        if (pid > 0) { analysis_passes[num_analysis].pid=pid; num_analysis++; }
+    }
+
+    /* 12. Clang-Tidy with all checker groups */
+    {
+        pid_t pid = fork();
+        if (pid == 0) {
+            FILE *rfp = fopen(analysis_passes[num_analysis].result_file, "w");
+            if (!rfp) _exit(0);
+            DetectedError le[16]; memset(le,0,sizeof(le)); int lc=0; char lo[65536]={0};
+            char tidy_out[MAX_OUTPUT_SIZE] = {0};
+            if (system("command -v clang-tidy >/dev/null 2>&1") == 0) {
+                char cmd[16384];
+                size_t pos = snprintf(cmd,sizeof(cmd),
+                    "clang-tidy --checks='clang-analyzer-*,bugprone-*,performance-*,"
+                    "portability-*,readability-*'");
+                for (int s=0; s<source_count && pos<sizeof(cmd)-4; s++)
+                    pos += snprintf(cmd+pos,sizeof(cmd)-pos," '%s'",sources[s]);
+                pos += snprintf(cmd+pos,sizeof(cmd)-pos," 2>&1");
+                FILE *pp = popen(cmd,"r");
+                if (pp) { size_t n=fread(tidy_out,1,sizeof(tidy_out)-1,pp); tidy_out[n]='\0'; pclose(pp); }
+            }
+            char *save;
+            char *line = strtok_r(tidy_out,"\n",&save);
+            while (line && lc < 16) {
+                if (string_contains(line,"warning:") || string_contains(line,"error:")) {
+                    int pat = classify_error(line);
+                    if (pat >= 0) {
+                        le[lc].type = error_patterns[pat].type;
+                        snprintf(le[lc].title,sizeof(le[lc].title),"%s",error_patterns[pat].title);
+                        snprintf(le[lc].fix_suggestion,sizeof(le[lc].fix_suggestion),"%s",error_patterns[pat].fix);
+                        le[lc].severity = error_patterns[pat].severity;
+                        le[lc].has_source = false; lc++;
+                    }
+                }
+                line = strtok_r(NULL,"\n",&save);
+            }
+            snprintf(lo,sizeof(lo),"%s",tidy_out);
+            ULTRA_CHILD_RESULT(lo,lc,le); fclose(rfp); _exit(0);
+        }
+        if (pid > 0) { analysis_passes[num_analysis].pid=pid; num_analysis++; }
+    }
+
+    /* 13. Boundary fuzz (10 edge-case inputs) */
+    {
+        pid_t pid = fork();
+        if (pid == 0) {
+            FILE *rfp = fopen(analysis_passes[num_analysis].result_file, "w");
+            if (!rfp) _exit(0);
+            DetectedError le[16]; memset(le,0,sizeof(le)); int lc=0; char lo[65536]={0};
+            const char *b = ULTRA_BIN("ASan+UBSan -O2");
+            if (b) lc = run_fuzz_analysis(b,le,16,lo,sizeof(lo),timeout_sec);
+            ULTRA_CHILD_RESULT(lo,lc,le); fclose(rfp); _exit(0);
+        }
+        if (pid > 0) { analysis_passes[num_analysis].pid=pid; num_analysis++; }
+    }
+
+    /* 14. Random fuzz (10 inputs from /dev/urandom) */
+    {
+        pid_t pid = fork();
+        if (pid == 0) {
+            FILE *rfp = fopen(analysis_passes[num_analysis].result_file, "w");
+            if (!rfp) _exit(0);
+            DetectedError le[16]; memset(le,0,sizeof(le)); int lc=0; char lo[65536]={0};
+            const char *b = ULTRA_BIN("ASan+UBSan -O2");
+            if (b && access(b,X_OK)==0) {
+                setenv("ASAN_OPTIONS","detect_leaks=1",1);
+                FILE *urandom = fopen("/dev/urandom","r");
+                for (int f=0; f<10 && lc<16; f++) {
+                    unsigned char rbuf[1024];
+                    if (!urandom) break;
+                    size_t rlen = (f%3==0) ? 4 : (f%3==1) ? 64 : 256;
+                    size_t got = fread(rbuf,1,rlen,urandom);
+                    char ifile[MAX_PATH_LEN];
+                    snprintf(ifile,sizeof(ifile),"/tmp/ultra_fuzz_%d_%d",(int)getpid(),f);
+                    FILE *ifp = fopen(ifile,"wb");
+                    if (ifp) { fwrite(rbuf,1,got,ifp); fclose(ifp); }
+                    char rc[8192];
+                    snprintf(rc,sizeof(rc),"timeout %d '%s' < '%s' 2>&1",timeout_sec/3,b,ifile);
+                    FILE *pp = popen(rc,"r");
+                    if (pp) {
+                        char robuf[8192];
+                        size_t n = fread(robuf,1,sizeof(robuf)-1,pp); robuf[n]='\0';
+                        int ex = pclose(pp);
+                        if (ex!=0 && ex!=128 && (string_contains(robuf,"ERROR:")||
+                            string_contains(robuf,"runtime error:")) && lc<16) {
+                            le[lc].type = ERR_SEG;
+                            snprintf(le[lc].title,sizeof(le[lc].title),"Random Fuzz Crash (input %d)",f);
+                            snprintf(le[lc].fix_suggestion,sizeof(le[lc].fix_suggestion),
+                                     "Random input #%d crashed — validate all input.",f);
+                            le[lc].severity=2; le[lc].has_source=false; lc++;
+                            snprintf(lo+strlen(lo),sizeof(lo)-strlen(lo),"Random fuzz %d: crash\n",f);
+                        }
+                    }
+                    unlink(ifile);
+                }
+                if (urandom) fclose(urandom);
+            }
+            ULTRA_CHILD_RESULT(lo,lc,le); fclose(rfp); _exit(0);
+        }
+        if (pid > 0) { analysis_passes[num_analysis].pid=pid; num_analysis++; }
+    }
+
+    /* 15. Rerun 3x for flaky detection */
+    {
+        pid_t pid = fork();
+        if (pid == 0) {
+            FILE *rfp = fopen(analysis_passes[num_analysis].result_file, "w");
+            if (!rfp) _exit(0);
+            DetectedError le[16]; memset(le,0,sizeof(le)); int lc=0; char lo[65536]={0};
+            const char *b = ULTRA_BIN("ASan+UBSan -O2");
+            if (b && access(b,X_OK)==0) {
+                int crash=0, clean=0;
+                for (int r=0; r<3; r++) {
+                    setenv("ASAN_OPTIONS","detect_leaks=1",1);
+                    char r_out[65536], r_err[65536];
+                    int ec = run_binary(b,NULL,r_out,sizeof(r_out),r_err,sizeof(r_err),timeout_sec,NULL);
+                    if (ec==-1||ec>128) crash++; else if (ec==0) clean++;
+                    size_t remain = sizeof(lo) - strlen(lo) - 2;
+                    if (remain > 8) {
+                        size_t rlen = strlen(r_err);
+                        if (rlen > remain - 40) rlen = remain - 40;
+                        snprintf(lo+strlen(lo),remain,
+                                 "=== Run %d: exit=%d ===\n%.*s\n",r,ec,(int)rlen,r_err);
+                    }
+                }
+                if (crash>0 && clean>0 && lc<16) {
+                    le[lc].type = ERR_UNKNOWN;
+                    snprintf(le[lc].title,sizeof(le[lc].title),
+                             "Non-Deterministic Crash (%d/3 runs)",crash);
+                    snprintf(le[lc].fix_suggestion,sizeof(le[lc].fix_suggestion),
+                             "Crashes %d/3 runs — non-deterministic bug. "
+                             "Check uninitialized vars, use-after-free, or data races.",crash);
+                    le[lc].severity=3; le[lc].has_source=false; lc++;
+                }
+            }
+            ULTRA_CHILD_RESULT(lo,lc,le); fclose(rfp); _exit(0);
+        }
+        if (pid > 0) { analysis_passes[num_analysis].pid=pid; num_analysis++; }
+    }
+
+    /* 16. GCov code coverage analysis */
+    {
+        pid_t pid = fork();
+        if (pid == 0) {
+            FILE *rfp = fopen(analysis_passes[num_analysis].result_file, "w");
+            if (!rfp) _exit(0);
+            DetectedError le[16]; memset(le,0,sizeof(le)); int lc=0; char lo[65536]={0};
+            const char *b = ULTRA_BIN("GCov");
+            if (b && access(b,X_OK)==0)
+                lc = run_coverage_analysis(b,sources,source_count,le,16,lo,sizeof(lo),timeout_sec);
+            ULTRA_CHILD_RESULT(lo,lc,le); fclose(rfp); _exit(0);
+        }
+        if (pid > 0) { analysis_passes[num_analysis].pid=pid; num_analysis++; }
+    }
+
+    /* 17. Dangerous API scan */
+    {
+        pid_t pid = fork();
+        if (pid == 0) {
+            FILE *rfp = fopen(analysis_passes[num_analysis].result_file, "w");
+            if (!rfp) _exit(0);
+            DetectedError le[16]; memset(le,0,sizeof(le)); int lc=0; char lo[65536]={0};
+            lc = scan_dangerous_apis(sources,source_count,le,16);
+            ULTRA_CHILD_RESULT(lo,lc,le); fclose(rfp); _exit(0);
+        }
+        if (pid > 0) { analysis_passes[num_analysis].pid=pid; num_analysis++; }
+    }
+
+    /* 18. clang MemorySanitizer (if clang available) */
+    {
+        pid_t pid = fork();
+        if (pid == 0) {
+            FILE *rfp = fopen(analysis_passes[num_analysis].result_file, "w");
+            if (!rfp) _exit(0);
+            DetectedError le[16]; memset(le,0,sizeof(le)); int lc=0; char lo[65536]={0};
+            if (system("command -v clang >/dev/null 2>&1") == 0) {
+                char msan_bin[MAX_PATH_LEN];
+                generate_temp_path("c_tester_msan",msan_bin,sizeof(msan_bin));
+                char cmd[16384];
+                size_t pos = snprintf(cmd,sizeof(cmd),
+                    "clang -fsanitize=memory -fsanitize-memory-track-origins=2 -g -O1 -o '%s'",msan_bin);
+                for (int s=0; s<source_count && pos<sizeof(cmd)-4; s++)
+                    pos += snprintf(cmd+pos,sizeof(cmd)-pos," '%s'",sources[s]);
+                pos += snprintf(cmd+pos,sizeof(cmd)-pos," 2>&1");
+                FILE *pp = popen(cmd,"r");
+                if (pp) { char buf[4096]; while(fgets(buf,sizeof(buf),pp)){} pclose(pp); }
+                if (access(msan_bin,X_OK)==0) {
+                    setenv("MSAN_OPTIONS","halt_on_error=0:report_umrs=1",1);
+                    char m_out[65536], m_err[65536];
+                    run_binary(msan_bin,NULL,m_out,sizeof(m_out),m_err,sizeof(m_err),timeout_sec,NULL);
+                    if (strlen(m_err)>0) {
+                        lc = parse_sanitizer_errors(m_err,le,16);
+                        snprintf(lo,sizeof(lo),"%s",m_err);
+                    }
+                    unlink(msan_bin);
+                }
+            }
+            ULTRA_CHILD_RESULT(lo,lc,le); fclose(rfp); _exit(0);
+        }
+        if (pid > 0) { analysis_passes[num_analysis].pid=pid; num_analysis++; }
+    }
+
+    /* 19. GCC Analyzer -O0 (different optimization reveals different bugs) */
+    {
+        pid_t pid = fork();
+        if (pid == 0) {
+            FILE *rfp = fopen(analysis_passes[num_analysis].result_file, "w");
+            if (!rfp) _exit(0);
+            DetectedError le[16]; memset(le,0,sizeof(le)); int lc=0; char lo[65536]={0};
+            char cmd[16384];
+            size_t pos = snprintf(cmd,sizeof(cmd),"gcc -fanalyzer -O0 -g -fsyntax-only");
+            for (int s=0; s<source_count && pos<sizeof(cmd)-4; s++)
+                pos += snprintf(cmd+pos,sizeof(cmd)-pos," '%s'",sources[s]);
+            pos += snprintf(cmd+pos,sizeof(cmd)-pos," 2>&1");
+            FILE *pp = popen(cmd,"r");
+            if (pp) { size_t n=fread(lo,1,sizeof(lo)-1,pp); lo[n]='\0'; pclose(pp); }
+            lc = parse_sanitizer_errors(lo,le,16);
+            ULTRA_CHILD_RESULT(lo,lc,le); fclose(rfp); _exit(0);
+        }
+        if (pid > 0) { analysis_passes[num_analysis].pid=pid; num_analysis++; }
+    }
+
+    /* 20. Large input stress (64KB of 'A' via stdin) */
+    {
+        pid_t pid = fork();
+        if (pid == 0) {
+            FILE *rfp = fopen(analysis_passes[num_analysis].result_file, "w");
+            if (!rfp) _exit(0);
+            DetectedError le[16]; memset(le,0,sizeof(le)); int lc=0; char lo[65536]={0};
+            const char *b = ULTRA_BIN("ASan+UBSan -O2");
+            if (b) {
+                char big_input[65536];
+                memset(big_input,'A',sizeof(big_input)-1); big_input[sizeof(big_input)-1]='\0';
+                char ifile[MAX_PATH_LEN];
+                snprintf(ifile,sizeof(ifile),"/tmp/ultra_big_%d",(int)getpid());
+                FILE *ifp = fopen(ifile,"w");
+                if (ifp) { fwrite(big_input,1,sizeof(big_input)-1,ifp); fclose(ifp); }
+                setenv("ASAN_OPTIONS","detect_leaks=1",1);
+                char cmd[8192];
+                snprintf(cmd,sizeof(cmd),"timeout %d '%s' < '%s' 2>&1",timeout_sec,b,ifile);
+                FILE *pp = popen(cmd,"r");
+                if (pp) { size_t n=fread(lo,1,sizeof(lo)-1,pp); lo[n]='\0'; pclose(pp); }
+                lc = parse_sanitizer_errors(lo,le,16);
+                unlink(ifile);
+            }
+            ULTRA_CHILD_RESULT(lo,lc,le); fclose(rfp); _exit(0);
+        }
+        if (pid > 0) { analysis_passes[num_analysis].pid=pid; num_analysis++; }
+    }
+
+    /* 21. Empty stdin */
+    {
+        pid_t pid = fork();
+        if (pid == 0) {
+            FILE *rfp = fopen(analysis_passes[num_analysis].result_file, "w");
+            if (!rfp) _exit(0);
+            DetectedError le[16]; memset(le,0,sizeof(le)); int lc=0; char lo[65536]={0};
+            const char *b = ULTRA_BIN("ASan+UBSan -O2");
+            if (b) {
+                setenv("ASAN_OPTIONS","detect_leaks=1",1);
+                char cmd[8192];
+                snprintf(cmd,sizeof(cmd),"timeout %d '%s' </dev/null 2>&1",timeout_sec,b);
+                FILE *pp = popen(cmd,"r");
+                if (pp) { size_t n=fread(lo,1,sizeof(lo)-1,pp); lo[n]='\0'; pclose(pp); }
+                lc = parse_sanitizer_errors(lo,le,16);
+            }
+            ULTRA_CHILD_RESULT(lo,lc,le); fclose(rfp); _exit(0);
+        }
+        if (pid > 0) { analysis_passes[num_analysis].pid=pid; num_analysis++; }
+    }
+
+    /* 22. Argv stress (100 long arguments) */
+    {
+        pid_t pid = fork();
+        if (pid == 0) {
+            FILE *rfp = fopen(analysis_passes[num_analysis].result_file, "w");
+            if (!rfp) _exit(0);
+            DetectedError le[16]; memset(le,0,sizeof(le)); int lc=0; char lo[65536]={0};
+            const char *b = ULTRA_BIN("ASan+UBSan -O2");
+            if (b) {
+                char cmd[32768];
+                size_t pos = snprintf(cmd,sizeof(cmd),"timeout %d '%s'",timeout_sec,b);
+                for (int a=0; a<100 && pos<sizeof(cmd)-128; a++)
+                    pos += snprintf(cmd+pos,sizeof(cmd)-pos," ARG%d=%030d",a,a);
+                pos += snprintf(cmd+pos,sizeof(cmd)-pos," 2>&1");
+                FILE *pp = popen(cmd,"r");
+                if (pp) { size_t n=fread(lo,1,sizeof(lo)-1,pp); lo[n]='\0'; pclose(pp); }
+                lc = parse_sanitizer_errors(lo,le,16);
+            }
+            ULTRA_CHILD_RESULT(lo,lc,le); fclose(rfp); _exit(0);
+        }
+        if (pid > 0) { analysis_passes[num_analysis].pid=pid; num_analysis++; }
+    }
+
+    /* 23. ASan+UBSan -Os with long argv (over 100 chars per arg) */
+    {
+        pid_t pid = fork();
+        if (pid == 0) {
+            FILE *rfp = fopen(analysis_passes[num_analysis].result_file, "w");
+            if (!rfp) _exit(0);
+            DetectedError le[16]; memset(le,0,sizeof(le)); int lc=0; char lo[65536]={0};
+            const char *b = ULTRA_BIN("ASan+UBSan -Os");
+            if (b) {
+                setenv("ASAN_OPTIONS","detect_leaks=1",1);
+                char r_out[65536], r_err[65536];
+                run_binary(b,NULL,r_out,sizeof(r_out),r_err,sizeof(r_err),timeout_sec,NULL);
+                lc = parse_sanitizer_errors(r_err,le,16);
+                snprintf(lo,sizeof(lo),"%s",r_err);
+            }
+            ULTRA_CHILD_RESULT(lo,lc,le); fclose(rfp); _exit(0);
+        }
+        if (pid > 0) { analysis_passes[num_analysis].pid=pid; num_analysis++; }
+    }
+
+    /* 24. Memset bug detection: check if memset(0) on sensitive data matters */
+    {
+        pid_t pid = fork();
+        if (pid == 0) {
+            FILE *rfp = fopen(analysis_passes[num_analysis].result_file, "w");
+            if (!rfp) _exit(0);
+            DetectedError le[16]; memset(le,0,sizeof(le)); int lc=0; char lo[65536]={0};
+            const char *b = ULTRA_BIN("ASan+UBSan -O2");
+            if (b) {
+                setenv("ASAN_OPTIONS","detect_leaks=1:check_memset_poison=1:max_malloc_fill_size=4096",1);
+                char r_out[65536], r_err[65536];
+                run_binary(b,NULL,r_out,sizeof(r_out),r_err,sizeof(r_err),timeout_sec,NULL);
+                lc = parse_sanitizer_errors(r_err,le,16);
+                snprintf(lo,sizeof(lo),"%s",r_err);
+            }
+            ULTRA_CHILD_RESULT(lo,lc,le); fclose(rfp); _exit(0);
+        }
+        if (pid > 0) { analysis_passes[num_analysis].pid=pid; num_analysis++; }
+    }
+
+    /* ─── Collect results from all analysis children ─── */
+    for (int p = 0; p < num_analysis; p++) {
+        int status;
+        waitpid(analysis_passes[p].pid, &status, 0);
+
+        FILE *rfp = fopen(analysis_passes[p].result_file, "r");
+        if (!rfp) continue;
+
+        int lc;
+        if (fscanf(rfp,"%d\n",&lc) != 1) { fclose(rfp); continue; }
+
+        for (int j = 0; j < lc && j < 16 && total_errors < max_errors; j++) {
+            DetectedError e;
+            memset(&e, 0, sizeof(e));
+            int has_src;
+            fscanf(rfp,"%d|%255[^|]|%1023[^|]|%d|%d|%d\n",
+                   (int*)&e.type, e.title, e.fix_suggestion,
+                   &e.source_line, &e.severity, &has_src);
+            e.has_source = (has_src != 0);
+            total_errors = merge_analysis_error(errors,total_errors,max_errors,
+                                                 &e,error_modes,1u << (p % 31));
+        }
+        fclose(rfp);
+        unlink(analysis_passes[p].result_file);
+    }
+
+    /* ─── Cleanup ─── */
+    for (int i = 0; i < num_var; i++) {
+        if (binary_paths[i]) {
+            if (binary_paths[i][0]) unlink(binary_paths[i]);
+            free(binary_paths[i]);
+        }
+    }
+    system("rm -f /tmp/ultra_fuzz_* /tmp/ultra_big_* 2>/dev/null");
+    system("rm -f *.gcda *.gcno *.gcov 2>/dev/null");
+
+    return total_errors;
+}
+#undef MAX_ANALYSIS_PASSES
+#undef ULTRA_NUM_VARIANTS
+#undef ULTRA_BIN
+#undef ULTRA_CHILD_RESULT
 
 /*
  * main - CLI entry point for c_tester
@@ -2475,9 +3907,23 @@ int main(int argc, char *argv[])
     char project_json[MAX_PATH_LEN] = {0};
     const char *html_path = NULL;
     int timeout_sec = DEFAULT_TIMEOUT_SEC;
-    int jobs = 1;
+    int jobs = 0;
     int error_count = 0;
     int i;
+    bool use_quick = false;
+    bool use_full = false;
+    bool use_git_diff = false;
+    bool use_gdb = false;
+    bool use_gcov = false;
+    bool use_libfuzzer = false;
+    bool use_ultra = false;
+    bool use_cache = false;
+    bool use_clear_cache = false;
+    bool use_generate_baseline = false;
+    bool use_install_hook = false;
+    bool use_uninstall_hook = false;
+    char baseline_path[MAX_PATH_LEN] = {0};
+    char git_bisect_ref[256] = {0};
 
     use_color = isatty(STDOUT_FILENO);
     init_colors(&colors, use_color);
@@ -2490,19 +3936,14 @@ int main(int argc, char *argv[])
             if (timeout_sec <= 0)
                 timeout_sec = DEFAULT_TIMEOUT_SEC;
         } else if (strncmp(argv[i], "--jobs=", 8) == 0) {
-            /* Matched --jobs= at argv[i] */
             jobs = atoi(argv[i] + 8);
-            /* After parsing --jobs= */
             if (jobs < 1) jobs = 1;
-            if (jobs > 8) jobs = 8;
         } else if (strcmp(argv[i], "--jobs") == 0 && i + 1 < argc) {
             jobs = atoi(argv[++i]);
             if (jobs < 1) jobs = 1;
-            if (jobs > 8) jobs = 8;
         } else if (strcmp(argv[i], "-j") == 0 && i + 1 < argc) {
             jobs = atoi(argv[++i]);
             if (jobs < 1) jobs = 1;
-            if (jobs > 8) jobs = 8;
         } else if (strcmp(argv[i], "--no-color") == 0) {
             use_color = false;
             init_colors(&colors, use_color);
@@ -2528,6 +3969,36 @@ int main(int argc, char *argv[])
             use_resources = true;
         } else if (strcmp(argv[i], "--danger") == 0) {
             use_danger = true;
+        } else if (strcmp(argv[i], "--quick") == 0) {
+            use_quick = true;
+        } else if (strcmp(argv[i], "--full") == 0) {
+            use_full = true;
+        } else if (strcmp(argv[i], "--ultra") == 0) {
+            use_ultra = true;
+        } else if (strcmp(argv[i], "--git-diff") == 0) {
+            use_git_diff = true;
+        } else if (strncmp(argv[i], "--git-bisect=", 13) == 0) {
+            strncpy(git_bisect_ref, argv[i] + 13, sizeof(git_bisect_ref) - 1);
+            git_bisect_ref[sizeof(git_bisect_ref) - 1] = '\0';
+        } else if (strcmp(argv[i], "--gdb") == 0) {
+            use_gdb = true;
+        } else if (strcmp(argv[i], "--gcov") == 0) {
+            use_gcov = true;
+        } else if (strcmp(argv[i], "--libfuzzer") == 0) {
+            use_libfuzzer = true;
+        } else if (strcmp(argv[i], "--cache") == 0) {
+            use_cache = true;
+        } else if (strcmp(argv[i], "--clear-cache") == 0) {
+            use_clear_cache = true;
+        } else if (strcmp(argv[i], "--generate-baseline") == 0) {
+            use_generate_baseline = true;
+        } else if (strncmp(argv[i], "--baseline=", 11) == 0) {
+            strncpy(baseline_path, argv[i] + 11, sizeof(baseline_path) - 1);
+            baseline_path[sizeof(baseline_path) - 1] = '\0';
+        } else if (strcmp(argv[i], "--install-hook") == 0) {
+            use_install_hook = true;
+        } else if (strcmp(argv[i], "--uninstall-hook") == 0) {
+            use_uninstall_hook = true;
         } else if (strncmp(argv[i], "--project=", 10) == 0) {
             strncpy(project_json, argv[i] + 10, sizeof(project_json) - 1);
             project_json[sizeof(project_json) - 1] = '\0';
@@ -2562,13 +4033,204 @@ int main(int argc, char *argv[])
         }
     }
 
-    /* Limit jobs to number of CPUs if jobs > sysconf(_SC_NPROCESSORS_ONLN) */
+    /* --install-hook: create a git pre-commit hook */
+    if (use_install_hook) {
+        const char *git_dir;
+        char hook_path[MAX_PATH_LEN];
+        FILE *hook_file;
+
+        git_dir = ".git";
+        if (access(git_dir, F_OK) != 0) {
+            print_colored(&colors, colors.red, "Error: ");
+            printf("No .git directory found in current directory\n");
+            return EXIT_USAGE_ERROR;
+        }
+
+        snprintf(hook_path, sizeof(hook_path), "%s/hooks/pre-commit", git_dir);
+        hook_file = fopen(hook_path, "w");
+        if (!hook_file) {
+            print_colored(&colors, colors.red, "Error: ");
+            printf("Failed to create pre-commit hook at %s\n", hook_path);
+            return EXIT_FILE_NOT_FOUND;
+        }
+
+        fprintf(hook_file,
+                "#!/bin/sh\n"
+                "# c_tester pre-commit hook (auto-installed)\n"
+                "./c_tester --quick --git-diff \"$@\" || exit 1\n");
+        fclose(hook_file);
+        chmod(hook_path, 0755);
+
+        print_colored(&colors, colors.green, "[OK] ");
+        printf("Pre-commit hook installed at %s\n", hook_path);
+        return EXIT_SUCCESS;
+    }
+
+    /* --uninstall-hook: remove git pre-commit hook */
+    if (use_uninstall_hook) {
+        const char *git_dir = ".git";
+        char hook_path[MAX_PATH_LEN];
+
+        snprintf(hook_path, sizeof(hook_path), "%s/hooks/pre-commit", git_dir);
+        if (unlink(hook_path) == 0) {
+            print_colored(&colors, colors.green, "[OK] ");
+            printf("Pre-commit hook removed from %s\n", hook_path);
+        } else {
+            print_colored(&colors, colors.yellow, "[WARN] ");
+            printf("No pre-commit hook found at %s (nothing to remove)\n", hook_path);
+        }
+        return EXIT_SUCCESS;
+    }
+
+    /* --clear-cache: remove the analysis cache directory */
+    if (use_clear_cache) {
+        const char *home = getenv("HOME");
+        if (home) {
+            char cache_dir[MAX_PATH_LEN];
+            char rm_cmd[MAX_PATH_LEN + 64];
+            snprintf(cache_dir, sizeof(cache_dir), "%s/.cache/c_tester", home);
+            snprintf(rm_cmd, sizeof(rm_cmd), "rm -rf '%s' 2>/dev/null", cache_dir);
+            system(rm_cmd);
+            print_colored(&colors, colors.green, "[OK] ");
+            printf("Cache cleared: %s\n", cache_dir);
+        }
+        return EXIT_SUCCESS;
+    }
+
+    /* --git-bisect: run git bisect with the source file */
+    if (git_bisect_ref[0]) {
+        char script_path[MAX_PATH_LEN];
+        char bisect_cmd[MAX_PATH_LEN * 3];
+        char *line_buf = malloc(65536);
+        FILE *pipe;
+        int script_ok = 0;
+
+        if (!line_buf) return EXIT_COMPILE_FAIL;
+
+        /* Create bisect script */
+        snprintf(script_path, sizeof(script_path),
+                 "/tmp/c_tester_bisect_%d.sh", (int)getpid());
+        FILE *sfp = fopen(script_path, "w");
+        if (sfp) {
+            fprintf(sfp,
+                    "#!/bin/sh\n"
+                    "# c_tester git bisect script\n");
+            /* Compile the source file */
+            for (int si = 0; si < source_count; si++)
+                fprintf(sfp, "SRC%d='%s'\n", si, source_files[si]);
+            fprintf(sfp,
+                    "SRCS=\"");
+            for (int si = 0; si < source_count; si++)
+                fprintf(sfp, " \"$SRC%d\"", si);
+            fprintf(sfp,
+                    "\"\n"
+                    "gcc -Wall -Wextra -fsanitize=address,undefined -o /tmp/c_tester_bisect_bin $SRCS 2>/dev/null || exit 125\n"
+                    "timeout 5 /tmp/c_tester_bisect_bin 2>/tmp/c_tester_bisect_err.txt\n"
+                    "EXIT=$?\n"
+                    "if [ \"$EXIT\" -ne 0 ] && [ \"$EXIT\" -ne 125 ]; then\n"
+                    "  if grep -q 'ERROR:\\|runtime error:\\|===.*WARNING' /tmp/c_tester_bisect_err.txt 2>/dev/null; then\n"
+                    "    exit 1\n"
+                    "  fi\n"
+                    "fi\n"
+                    "exit 0\n");
+            fclose(sfp);
+            chmod(script_path, 0755);
+            script_ok = 1;
+        }
+
+        if (!script_ok) {
+            free(line_buf);
+            print_colored(&colors, colors.red, "Error: ");
+            printf("Failed to create bisect script\n");
+            return EXIT_COMPILE_FAIL;
+        }
+
+        /* Run git bisect */
+        print_colored(&colors, colors.cyan, "[bisect] ");
+        printf("Running git bisect start HEAD %s\n", git_bisect_ref);
+        fflush(stdout);
+
+        snprintf(bisect_cmd, sizeof(bisect_cmd),
+                 "git bisect start HEAD '%s' 2>&1 && git bisect run '%s' 2>&1",
+                 git_bisect_ref, script_path);
+
+        pipe = popen(bisect_cmd, "r");
+        if (pipe) {
+            size_t n = fread(line_buf, 1, 65535, pipe);
+            line_buf[n] = '\0';
+            pclose(pipe);
+            printf("%s\n", line_buf);
+        }
+
+        unlink(script_path);
+        free(line_buf);
+        return EXIT_SUCCESS;
+    }
+
+    /* --git-diff: filter source files to only those changed in git diff */
+    if (use_git_diff) {
+        char diff_cmd[256];
+        FILE *pipe;
+        char changed[32][MAX_PATH_LEN];
+        int changed_count = 0;
+
+        snprintf(diff_cmd, sizeof(diff_cmd),
+                 "git diff --name-only HEAD 2>/dev/null");
+        pipe = popen(diff_cmd, "r");
+        if (pipe) {
+            char line[MAX_PATH_LEN];
+            while (fgets(line, sizeof(line), pipe) && changed_count < 32) {
+                size_t len = strlen(line);
+                if (len > 0 && line[len - 1] == '\n')
+                    line[len - 1] = '\0';
+                memcpy(changed[changed_count], line, MAX_PATH_LEN - 1);
+                changed[changed_count][MAX_PATH_LEN - 1] = '\0';
+                changed_count++;
+            }
+            pclose(pipe);
+        }
+
+        /* Filter source_files to only those in the diff */
+        int filtered = 0;
+        for (i = 0; i < source_count; i++) {
+            for (int j = 0; j < changed_count; j++) {
+                if (strstr(source_files[i], changed[j]) ||
+                    strstr(changed[j], source_files[i])) {
+                    source_files[filtered++] = source_files[i];
+                    break;
+                }
+            }
+        }
+        source_count = filtered;
+
+        if (source_count == 0) {
+            print_colored(&colors, colors.green, "[OK] ");
+            printf("No changed files to analyze\n");
+            return EXIT_CLEAN;
+        }
+    }
+
+    /* Default to --quick if no analysis mode was explicitly set */
+    if (!use_tsan && !use_analyzer && !use_clang_tidy &&
+        !use_valgrind && !use_max && !use_fuzz && !use_danger &&
+        !use_resources && !use_gcov && !use_libfuzzer && !use_ultra &&
+        !use_full && rerun_count == 0) {
+        use_quick = true;
+    }
+
+    /* Auto-detect CPU count for --jobs=nproc behavior */
     long cpu_count = sysconf(_SC_NPROCESSORS_ONLN);
     if (cpu_count < 1) cpu_count = 1;
-    if (jobs > cpu_count) {
+    /* --ultra forces maximum parallelism */
+    if (use_ultra) {
         jobs = (int)cpu_count;
-        if (jobs > 8) jobs = 8;
+    } else if (jobs <= 0) {
+        /* Default: use nproc, but cap at 4 for non-ultra mode */
+        jobs = (int)cpu_count;
+        if (jobs > 4) jobs = 4;
     }
+    if (jobs > (int)cpu_count)
+        jobs = (int)cpu_count;
 
     /* Parallel processing with fork() + waitpid() */
     /* Checking parallel mode availability */
@@ -2597,6 +4259,7 @@ int main(int argc, char *argv[])
             if (pid == 0) {
                 /* Child: process ONE file by execing c_tester */
                 char timeout_str[32];
+                char rerun_str[32];
                 char project_str[MAX_PATH_LEN + 16];
                 char html_str[MAX_PATH_LEN + 16];
 
@@ -2604,7 +4267,7 @@ int main(int argc, char *argv[])
 
                 /* Build argument list for child */
                 int arg_idx = 0;
-                char *child_argv[32];
+                char *child_argv[48];
                 child_argv[arg_idx++] = "./c_tester";
                 if (keep_binary) child_argv[arg_idx++] = "--keep";
                 child_argv[arg_idx++] = timeout_str;
@@ -2613,8 +4276,15 @@ int main(int argc, char *argv[])
                 if (use_valgrind) child_argv[arg_idx++] = "--valgrind";
                 if (use_max) child_argv[arg_idx++] = "--max";
                 if (use_fuzz) child_argv[arg_idx++] = "--fuzz";
+                if (use_quick) child_argv[arg_idx++] = "--quick";
+                if (use_full) child_argv[arg_idx++] = "--full";
+                if (use_ultra) child_argv[arg_idx++] = "--ultra";
+                if (use_git_diff) child_argv[arg_idx++] = "--git-diff";
+                if (use_gdb) child_argv[arg_idx++] = "--gdb";
+                if (use_gcov) child_argv[arg_idx++] = "--gcov";
+                if (use_libfuzzer) child_argv[arg_idx++] = "--libfuzzer";
+                if (use_cache) child_argv[arg_idx++] = "--cache";
                 if (rerun_count > 0) {
-                    char rerun_str[32];
                     snprintf(rerun_str, sizeof(rerun_str), "--rerun=%d", rerun_count);
                     child_argv[arg_idx++] = rerun_str;
                 }
@@ -2627,6 +4297,11 @@ int main(int argc, char *argv[])
                 if (html_path) {
                     snprintf(html_str, sizeof(html_str), "--html=%s", html_path);
                     child_argv[arg_idx++] = html_str;
+                }
+                if (baseline_path[0]) {
+                    char buf[MAX_PATH_LEN + 16];
+                    snprintf(buf, sizeof(buf), "--baseline=%s", baseline_path);
+                    child_argv[arg_idx++] = strdup(buf);
                 }
                 child_argv[arg_idx++] = (char *)source_files[i];
                 child_argv[arg_idx++] = NULL;
@@ -2655,6 +4330,7 @@ int main(int argc, char *argv[])
 
     /* Single-file or jobs=1 processing */
     print_banner(&colors, source_files, source_count);
+    memset(&result, 0, sizeof(result));
 
     if (use_max) {
         error_count = run_max_analysis(source_files, source_count,
@@ -2667,6 +4343,81 @@ int main(int argc, char *argv[])
                 printf("Report saved to: %s\n", html_path);
             }
         }
+        return error_count > 0 ? EXIT_ERRORS_FOUND : EXIT_CLEAN;
+    }
+
+    /* --ultra: ALL analysis modes, max parallelism */
+    if (use_ultra) {
+        print_colored(&colors, colors.bold, "\n=== ULTRA ANALYSIS MODE ===\n");
+        print_colored(&colors, colors.cyan, "[ultra] ");
+        printf("Running all %d analysis passes with %d parallel workers...\n\n",
+               jobs, jobs);
+        fflush(stdout);
+
+        result.compilation_success = true;
+        error_count = run_ultra_analysis(source_files, source_count,
+                                          errors, 32,
+                                          timeout_sec, &colors);
+        if (html_path && html_path[0] != '\0') {
+            if (generate_html_report(html_path, source_files, source_count,
+                                      &result, errors, error_count) == 0) {
+                print_colored(&colors, colors.green, "[HTML] ");
+                printf("Report saved to: %s\n", html_path);
+            }
+        }
+        print_summary(&colors, &result, error_count, errors);
+        return error_count > 0 ? EXIT_ERRORS_FOUND : EXIT_CLEAN;
+    }
+
+    /* --gcov: standalone code coverage analysis */
+    if (use_gcov) {
+        char gcov_bin[MAX_PATH_LEN];
+        generate_temp_path("c_tester_gcov", gcov_bin, sizeof(gcov_bin));
+
+        /* Compile with coverage flags */
+        char compile_cmd[MAX_PATH_LEN * 8 + 128];
+        size_t pos = snprintf(compile_cmd, sizeof(compile_cmd),
+            "gcc --coverage -g -O0 -o '%s'", gcov_bin);
+        for (int si = 0; si < source_count && pos < sizeof(compile_cmd) - 4; si++)
+            pos += snprintf(compile_cmd + pos, sizeof(compile_cmd) - pos,
+                            " '%s'", source_files[si]);
+        pos += snprintf(compile_cmd + pos, sizeof(compile_cmd) - pos, " 2>&1");
+
+        FILE *pipe = popen(compile_cmd, "r");
+        if (pipe) {
+            char comp_out[65536];
+            size_t n = fread(comp_out, 1, sizeof(comp_out) - 1, pipe);
+            comp_out[n] = '\0';
+            pclose(pipe);
+        }
+
+        if (access(gcov_bin, X_OK) != 0) {
+            print_colored(&colors, colors.red, "[ERROR] ");
+            printf("Coverage compilation failed (tried: %s)\n", gcov_bin);
+            return EXIT_COMPILE_FAIL;
+        }
+
+        result.compilation_success = true;
+        error_count = run_coverage_analysis(gcov_bin, source_files, source_count,
+                                            errors, 32,
+                                            result.sanitizer_output,
+                                            sizeof(result.sanitizer_output),
+                                            timeout_sec);
+        unlink(gcov_bin);
+        system("rm -f *.gcda *.gcno *.gcov 2>/dev/null");
+        print_summary(&colors, &result, error_count, errors);
+        return error_count > 0 ? EXIT_ERRORS_FOUND : EXIT_CLEAN;
+    }
+
+    /* --libfuzzer: standalone libFuzzer analysis */
+    if (use_libfuzzer) {
+        error_count = run_libfuzzer_analysis(source_files, source_count,
+                                             errors, 32,
+                                             result.sanitizer_output,
+                                             sizeof(result.sanitizer_output),
+                                             timeout_sec);
+        result.compilation_success = true;
+        print_summary(&colors, &result, error_count, errors);
         return error_count > 0 ? EXIT_ERRORS_FOUND : EXIT_CLEAN;
     }
 
@@ -2687,8 +4438,6 @@ int main(int argc, char *argv[])
     }
 
     generate_temp_path("c_tester", binary_path, sizeof(binary_path));
-
-    memset(&result, 0, sizeof(result));
 
     /* Use compile_commands.json if specified */
     if (project_json[0]) {
@@ -2711,23 +4460,82 @@ int main(int argc, char *argv[])
         }
     }
 
+    /* --quick: fast feedback with basic flags only */
+    if (use_quick && !result.compilation_success) {
+        char quick_bin[MAX_PATH_LEN];
+        generate_temp_path("c_tester_quick", quick_bin, sizeof(quick_bin));
+
+        int comp_ret = compile_with_basic_flags(source_files, source_count,
+                         quick_bin,
+                         result.compiler_output,
+                         sizeof(result.compiler_output));
+
+
+        if (comp_ret != 0) {
+            print_colored(&colors, colors.red, "[COMPILE ERROR]\n");
+            printf("%s\n", result.compiler_output);
+            return EXIT_COMPILE_FAIL;
+        }
+
+        result.compilation_success = true;
+
+        /* Quick mode: just run once, check exit code */
+        result.exit_code = run_binary(quick_bin, NULL,
+                                      result.runtime_output,
+                                      sizeof(result.runtime_output),
+                                      result.sanitizer_output,
+                                      sizeof(result.sanitizer_output),
+                                      timeout_sec, NULL);
+
+        if (result.exit_code == -1) {
+            print_colored(&colors, colors.yellow, "[TIMEOUT] ");
+            printf("Program timed out after %d seconds\n", timeout_sec);
+            error_count = 1;
+        } else if (result.exit_code != 0) {
+            /* Non-zero exit — check for signal termination or crash */
+            int signal_num = 0;
+            if (result.exit_code > 128)
+                signal_num = result.exit_code - 128;
+            if (signal_num > 0) {
+                /* Terminated by signal — create proper error entry */
+                error_count = parse_signal_errors(
+                    result.sanitizer_output, result.exit_code,
+                    signal_num, errors, 32);
+            }
+            if (error_count == 0) {
+                /* No structured error — try parsing output */
+                if (result.sanitizer_output[0] == '\0') {
+                    snprintf(result.sanitizer_output,
+                             sizeof(result.sanitizer_output),
+                             "Process exited with code %d", result.exit_code);
+                }
+                error_count = parse_sanitizer_errors(result.sanitizer_output,
+                                                      errors, 32);
+            }
+        }
+
+        for (i = 0; i < error_count; i++)
+            generate_fix_suggestion(&errors[i]);
+        print_summary(&colors, &result, error_count, errors);
+        if (!keep_binary) unlink(quick_bin);
+        return error_count > 0 ? EXIT_ERRORS_FOUND : EXIT_CLEAN;
+    }
+
     if (!result.compilation_success) {
-        if (use_valgrind) {
+        if ((use_valgrind || use_resources) && !use_fuzz && rerun_count == 0) {
+            /* Valgrind (and --resources) need a binary without ASan.
+             * Fuzz/rerun modes need ASan instrumentation — if combined
+             * with --valgrind or --resources, ASan wins (fuzz/rerun
+             * execution branch runs first). */
+            const char *mode = use_resources ? "--resources" : "--valgrind";
+            (void)mode;
             if (compile_for_valgrind(source_files, source_count, binary_path,
                                     result.compiler_output,
                                     sizeof(result.compiler_output)) == 0) {
                 result.compilation_success = true;
             }
-        } else if (use_resources) {
-            /* --resources runs under valgrind --track-fds.
-             * Compile without sanitizers (incompatible with valgrind). */
-            if (compile_for_valgrind(source_files, source_count, binary_path,
-                                     result.compiler_output,
-                                     sizeof(result.compiler_output)) == 0) {
-                result.compilation_success = true;
-            }
         } else if (use_fuzz || rerun_count > 0) {
-            /* New modes: compile with sanitizers for runtime analysis.
+            /* Fuzz and rerun: compile with sanitizers for runtime analysis.
              * Respect --tsan flag if provided alongside --rerun. */
             if (use_tsan) {
                 if (is_cpp_file(source_files[0])) {
@@ -2756,6 +4564,26 @@ int main(int argc, char *argv[])
                     result.compilation_success = true;
                 }
             }
+        } else if (use_analyzer) {
+            if (is_cpp_file(source_files[0])) {
+                if (compile_cpp_with_analyzer(source_files, source_count,
+                                          binary_path,
+                                          result.compiler_output,
+                                          sizeof(result.compiler_output)) == 0) {
+                    result.compilation_success = true;
+                }
+            } else if (compile_with_analyzer(source_files, source_count,
+                                            binary_path,
+                                            result.compiler_output,
+                                            sizeof(result.compiler_output)) == 0) {
+                result.compilation_success = true;
+            }
+        } else if (use_clang_tidy) {
+            if (compile_with_clang_tidy(source_files, source_count,
+                                       result.compiler_output,
+                                       sizeof(result.compiler_output)) == 0) {
+                result.compilation_success = true;
+            }
         } else if (is_cpp_file(source_files[0])) {
             if (use_tsan) {
                 if (compile_cpp_with_tsan(source_files, source_count, binary_path,
@@ -2781,26 +4609,6 @@ int main(int argc, char *argv[])
             } else if (compile_fallback(source_files, source_count, binary_path,
                                         result.compiler_output,
                                         sizeof(result.compiler_output)) == 0) {
-                result.compilation_success = true;
-            }
-        } else if (use_analyzer) {
-            if (is_cpp_file(source_files[0])) {
-                if (compile_cpp_with_analyzer(source_files, source_count,
-                                          binary_path,
-                                          result.compiler_output,
-                                          sizeof(result.compiler_output)) == 0) {
-                    result.compilation_success = true;
-                }
-            } else if (compile_with_analyzer(source_files, source_count,
-                                            binary_path,
-                                            result.compiler_output,
-                                            sizeof(result.compiler_output)) == 0) {
-                result.compilation_success = true;
-            }
-        } else if (use_clang_tidy) {
-            if (compile_with_clang_tidy(source_files, source_count,
-                                       result.compiler_output,
-                                       sizeof(result.compiler_output)) == 0) {
                 result.compilation_success = true;
             }
         } else {
@@ -2903,6 +4711,30 @@ int main(int argc, char *argv[])
                                    errors + error_count,
                                    32 - error_count);
         error_count += sanitizer_count;
+
+        /* --gdb: run GDB on crash for detailed backtrace */
+        if (use_gdb && result.exit_code > 0 && result.exit_code != EXIT_CLEAN) {
+            char gdb_cmd[8192];
+            char gdb_out[65536];
+            FILE *gdb_pipe;
+            snprintf(gdb_cmd, sizeof(gdb_cmd),
+                     "gdb -batch -ex run -ex \"bt full\" "
+                     "-ex \"info registers\" --args '%s' 2>&1",
+                     binary_path);
+            gdb_pipe = popen(gdb_cmd, "r");
+            if (gdb_pipe) {
+                size_t n = fread(gdb_out, 1, sizeof(gdb_out) - 1, gdb_pipe);
+                gdb_out[n] = '\0';
+                pclose(gdb_pipe);
+                size_t slen = strlen(result.sanitizer_output);
+                size_t glen = strlen(gdb_out);
+                if (slen + glen + 64 < sizeof(result.sanitizer_output)) {
+                    snprintf(result.sanitizer_output + slen,
+                             sizeof(result.sanitizer_output) - slen,
+                             "\n--- GDB Backtrace ---\n%s\n", gdb_out);
+                }
+            }
+        }
     }
 
     if (error_count == 0 &&
@@ -2999,7 +4831,36 @@ int main(int argc, char *argv[])
     for (i = 0; i < error_count; i++)
         generate_fix_suggestion(&errors[i]);
 
+    /* --baseline: suppress known errors from a baseline file */
+    if (baseline_path[0]) {
+        int before = error_count;
+        load_baseline_and_filter(baseline_path, errors, &error_count);
+        int suppressed = before - error_count;
+        if (suppressed > 0) {
+            print_colored(&colors, colors.cyan, "[baseline] ");
+            printf("Suppressed %d known error(s) from %s\n",
+                   suppressed, baseline_path);
+        }
+    }
+
     print_summary(&colors, &result, error_count, errors);
+
+    /* --generate-baseline: save current errors as baseline JSON */
+    if (use_generate_baseline) {
+        char baseline_file[MAX_PATH_LEN];
+        if (baseline_path[0])
+            strncpy(baseline_file, baseline_path, sizeof(baseline_file) - 1);
+        else
+            snprintf(baseline_file, sizeof(baseline_file),
+                     "c_tester-baseline.json");
+        baseline_file[sizeof(baseline_file) - 1] = '\0';
+
+        if (save_baseline(baseline_file, errors, error_count) == 0) {
+            print_colored(&colors, colors.green, "[baseline] ");
+            printf("Baseline saved to: %s (%d errors)\n",
+                   baseline_file, error_count);
+        }
+    }
 
     if (html_path && html_path[0] != '\0') {
         if (generate_html_report(html_path, source_files, source_count,

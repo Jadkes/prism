@@ -1,7 +1,0 @@
-#include <stdio.h>
-int main(void) {
-    int x = -2147483648;
-    x = x - 1;
-    printf("%d\n", x);
-    return 0;
-}

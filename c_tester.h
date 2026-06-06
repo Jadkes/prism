@@ -618,4 +618,104 @@ int scan_dangerous_apis(const char **sources, int source_count,
  */
 void get_execution_time(struct timespec *start, struct timespec *end, long *ms);
 
+/*
+ * compile_with_basic_flags - Quick compile with -Wall -Wextra -Werror only
+ *
+ * WHY: --quick mode needs fast feedback without sanitizer overhead.
+ *      Compiles with basic warning flags and runs the binary once.
+ *
+ * @return 0 on success, non-zero on failure
+ */
+int compile_with_basic_flags(const char **sources, int source_count,
+                              const char *binary,
+                              char *output, size_t output_size);
+
+/*
+ * run_coverage_analysis - Compile and run with --gcov code coverage
+ *
+ * WHY: After running the binary under coverage instrumentation, gcov
+ *      data shows which lines and branches were actually executed.
+ *
+ * @return Number of errors found during coverage run, or -1 on failure
+ */
+int run_coverage_analysis(const char *binary, const char **sources,
+                           int source_count, DetectedError *errors,
+                           int max_errors, char *output, size_t output_size,
+                           int timeout_sec);
+
+/*
+ * run_libfuzzer_analysis - Compile and run with libFuzzer
+ *
+ * WHY: libFuzzer performs coverage-guided mutation fuzzing to find
+ *      crashes that boundary testing misses. Requires clang and a
+ *      LLVMFuzzerTestOneInput() function in the source.
+ *
+ * @return Number of crashes found, or -1 on failure
+ */
+int run_libfuzzer_analysis(const char **sources, int source_count,
+                            DetectedError *errors, int max_errors,
+                            char *output, size_t output_size,
+                            int timeout_sec);
+
+/*
+ * run_ultra_analysis - Run ALL analysis modes in parallel
+ *
+ * WHY: --ultra runs every checker simultaneously using fork-based
+ *      parallelism. Faster than --max (which runs sequentially) and
+ *      more thorough (adds gcov, libfuzzer, fuzz, rerun, resources).
+ *      Forces --jobs=nproc for maximum throughput.
+ *
+ * @return Total number of unique errors found
+ */
+int run_ultra_analysis(const char **sources, int source_count,
+                        DetectedError *errors, int max_errors,
+                        int timeout_sec, const ColorCodes *colors);
+
+/*
+ * save_baseline - Save current errors as a baseline JSON file
+ *
+ * WHY: --generate-baseline creates a snapshot of known errors.
+ *      Future runs with --baseline=file.json suppress these errors
+ *      so only NEW issues are reported (essential for CI).
+ */
+int save_baseline(const char *path, const DetectedError *errors,
+                   int error_count);
+
+/*
+ * load_baseline - Load a baseline and filter matching errors
+ *
+ * WHY: --baseline=file.json loads previously saved errors and
+ *      removes any current errors that match by type+file+line.
+ *      Returns the filtered error count.
+ */
+int load_baseline_and_filter(const char *path,
+                              DetectedError *errors, int *error_count);
+
+/*
+ * compute_source_hash - Compute MD5 hash of source file contents
+ *
+ * WHY: Used by --cache to detect source file changes.
+ *      Returns a hex string (e.g. "d41d8cd98f00b204e9800998ecf8427e").
+ */
+int compute_source_hash(const char *source_file, char *hash_buf,
+                         size_t hash_buf_size);
+
+/*
+ * save_cache_entry - Save compilation result to cache
+ *
+ * WHY: Stores hashed compilation output so unchanged files can
+ *      skip recompilation on subsequent runs.
+ */
+void save_cache_entry(const char *hash, bool success,
+                       const char *compiler_output);
+
+/*
+ * load_cache_entry - Load cached compilation result
+ *
+ * WHY: Returns 0 and populates compiler_output if a valid cached
+ *      compilation exists for the given source hash.
+ */
+int load_cache_entry(const char *hash, bool *success,
+                      char *compiler_output, size_t output_size);
+
 #endif /* C_TESTER_H */
