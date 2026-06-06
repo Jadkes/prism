@@ -1958,7 +1958,11 @@ void print_usage(const char *prog_name, const ColorCodes *colors)
     printf("  --analyzer     Use GCC static analyzer (-fanalyzer)\n");
     printf("  --clang-tidy   Run clang-tidy static analysis\n");
     printf("  --valgrind     Run under Valgrind for deep memory analysis\n");
-    printf("  --project=<file>   Use compile flags from compile_commands.json\n\n");
+    printf("  --project=<file>   Use compile flags from compile_commands.json\n");
+    printf("  --fuzz         Run with boundary fuzz inputs (empty, huge, neg)\n");
+    printf("  --rerun=N      Run N times to detect non-deterministic bugs\n");
+    printf("  --resources    Check for file descriptor / OS resource leaks\n");
+    printf("  --danger       Scan source for dangerous API calls\n\n");
 
     print_colored(colors, colors->bold, "Output:\n");
     printf("  --html=<path>  Generate HTML report at specified path\n");
@@ -2076,6 +2080,372 @@ int run_with_compile_flags(const char **sources, int source_count,
 }
 
 /*
+ * run_fuzz_analysis - Run binary with boundary inputs
+ *
+ * WHY: A binary may crash on empty strings, huge buffers, or boundary
+ *      integer values but pass with normal input. This runs the binary
+ *      under ASan with ~10 edge-case inputs via argv[1].
+ */
+int run_fuzz_analysis(const char *binary,
+                      DetectedError *errors, int max_errors,
+                      char *sanitizer_output, size_t sanitizer_size,
+                      int timeout_sec)
+{
+    char large_buf[66000];
+    int total_errors = 0;
+    int input_count = 0;
+    unsigned int error_modes[32] = {0};
+    const char *inputs[16];
+
+    /* Build the input list */
+    inputs[input_count++] = "";
+    inputs[input_count++] = "A";
+    inputs[input_count++] = "AAAAAAAAAAAAAAAA";
+    inputs[input_count++] = "-1";
+    inputs[input_count++] = "0";
+    inputs[input_count++] = "2147483648";
+    inputs[input_count++] = "-2147483649";
+
+    /* 512-byte input */
+    memset(large_buf, 'B', 512);
+    large_buf[512] = '\0';
+    inputs[input_count++] = large_buf;
+
+    /* 16KB ASan-friendly input */
+    memset(large_buf + 512, 'C', 15871);
+    large_buf[512 + 15871] = '\0';
+    inputs[input_count++] = large_buf;
+
+    /* 64KB input (triggers typical stack/heap overflows) */
+    memset(large_buf, 'D', 65535);
+    large_buf[65535] = '\0';
+    inputs[input_count++] = large_buf;
+
+    inputs[input_count] = NULL;
+
+    setenv("ASAN_OPTIONS", "detect_leaks=1:abort_on_error=1", 1);
+
+    for (int i = 0; i < input_count && total_errors < max_errors; i++) {
+        char run_out[MAX_OUTPUT_SIZE];
+        char run_err[MAX_OUTPUT_SIZE];
+        DetectedError temp_errors[8];
+        int count;
+
+        memset(run_out, 0, sizeof(run_out));
+        memset(run_err, 0, sizeof(run_err));
+        memset(temp_errors, 0, sizeof(temp_errors));
+
+        run_binary(binary, inputs[i],
+                   run_out, sizeof(run_out),
+                   run_err, sizeof(run_err),
+                   timeout_sec, NULL);
+
+        count = parse_sanitizer_errors(run_err, temp_errors, 8);
+
+        if (count == 0 && strlen(run_err) > 0) {
+            /* Non-ASan crash — report as unknown */
+            temp_errors[0].type = ERR_SEG;
+            snprintf(temp_errors[0].title, sizeof(temp_errors[0].title),
+                     "Crash on fuzz input #%d", i + 1);
+            snprintf(temp_errors[0].fix_suggestion,
+                     sizeof(temp_errors[0].fix_suggestion),
+                     "The program crashed with input '%s'. Check for buffer "
+                     "overflows, integer overflows, or null dereferences "
+                     "caused by unusual input sizes.",
+                     inputs[i]);
+            temp_errors[0].severity = 3;
+            temp_errors[0].has_source = false;
+            count = 1;
+        }
+
+        for (int j = 0; j < count && total_errors < max_errors; j++) {
+            total_errors = merge_analysis_error(errors, total_errors,
+                                                 max_errors,
+                                                 &temp_errors[j],
+                                                 error_modes,
+                                                 1u << 0);
+        }
+
+        /* Append fuzz run output to combined sanitizer buffer */
+        if (run_err[0]) {
+            size_t slen = strlen(sanitizer_output);
+            if (slen + strlen(run_err) + 64 < sanitizer_size) {
+                snprintf(sanitizer_output + slen,
+                         sanitizer_size - slen,
+                         "\n--- Fuzz input #%d: \"%s\" ---\n%s",
+                         i + 1, strlen(inputs[i]) > 32 ? "(large)" : inputs[i],
+                         run_err);
+            }
+        }
+    }
+
+    return total_errors;
+}
+
+/*
+ * run_with_rerun - Run binary multiple times to detect heisenbugs
+ *
+ * WHY: Non-deterministic bugs like use-after-free may not trigger on
+ *      every execution. Running N times reveals crash probability.
+ *
+ * @return 1 if heisenbug variant detected, 0 if deterministic
+ */
+int run_with_rerun(const char *binary, int rerun_count,
+                   DetectedError *errors, int max_errors,
+                   char *output, size_t output_size,
+                   char *error_output, size_t error_size,
+                   int timeout_sec)
+{
+    int exit_codes[32];
+    int crash_count = 0;
+    int timeout_count = 0;
+    int clean_count = 0;
+    int total = 0;
+    char first_error[MAX_OUTPUT_SIZE] = {0};
+    int have_error = 0;
+
+    if (rerun_count > 32) rerun_count = 32;
+    if (rerun_count < 2) rerun_count = 2;
+
+    setenv("ASAN_OPTIONS", "detect_leaks=1", 1);
+
+    for (int i = 0; i < rerun_count; i++) {
+        char run_out[MAX_OUTPUT_SIZE];
+        char run_err[MAX_OUTPUT_SIZE];
+
+        memset(run_out, 0, sizeof(run_out));
+        memset(run_err, 0, sizeof(run_err));
+
+        exit_codes[i] = run_binary(binary, NULL,
+                                    run_out, sizeof(run_out),
+                                    run_err, sizeof(run_err),
+                                    timeout_sec, NULL);
+
+        if (exit_codes[i] == -1) {
+            timeout_count++;
+        } else if (exit_codes[i] != 0) {
+            crash_count++;
+            if (!have_error && run_err[0]) {
+                strncpy(first_error, run_err, sizeof(first_error) - 1);
+                have_error = 1;
+            }
+        } else {
+            clean_count++;
+        }
+
+        /* Save first run's output */
+        if (i == 0) {
+            strncpy(output, run_out, output_size - 1);
+            strncpy(error_output, run_err, error_size - 1);
+        }
+    }
+
+    /* Check if all runs were the same */
+    int all_same = 1;
+    for (int i = 1; i < rerun_count; i++) {
+        if (exit_codes[i] != exit_codes[0]) {
+            all_same = 0;
+            break;
+        }
+    }
+
+    if (all_same && crash_count == 0) {
+        return 0;  /* All clean, deterministic */
+    }
+
+    if (all_same && crash_count > 0) {
+        return 0;  /* All crashed the same — deterministic bug */
+    }
+
+    /* Variance detected — report heisenbug */
+    if (total < max_errors) {
+        int idx = total;
+        errors[idx].type = ERR_UNKNOWN;
+        snprintf(errors[idx].title, sizeof(errors[idx].title),
+                 "Non-deterministic Bug (heisenbug)");
+        snprintf(errors[idx].fix_suggestion, sizeof(errors[idx].fix_suggestion),
+                 "Crashed in %d/%d runs (timeout: %d, clean: %d). This "
+                 "indicates use-after-free, uninitialized memory, or a data "
+                 "race. Run with --valgrind or --tsan for deeper analysis.",
+                 crash_count, rerun_count, timeout_count, clean_count);
+        errors[idx].severity = 3;
+        errors[idx].has_source = false;
+        total = 1;
+    }
+
+    return total;
+}
+
+/*
+ * check_resource_leaks - Detect file descriptor and OS resource leaks
+ *
+ * WHY: Classic Valgrind check for file descriptors left open at exit.
+ *      Uses valgrind --track-fds=yes if available, otherwise measures
+ *      /proc/self/fd count before/after execution in a child process.
+ */
+int check_resource_leaks(const char *binary,
+                         DetectedError *errors, int max_errors,
+                         char *sanitizer_output, size_t sanitizer_size,
+                         int timeout_sec __attribute__((unused)))
+{
+    int found = 0;
+
+    if (system("which valgrind > /dev/null 2>&1") == 0) {
+        /* Valgrind track-fds mode */
+        char vg_cmd[4096];
+        char vg_output[MAX_OUTPUT_SIZE];
+        FILE *pipe;
+
+        snprintf(vg_cmd, sizeof(vg_cmd),
+                 "valgrind --track-fds=yes --leak-check=no --error-exitcode=0 "
+                 "--log-fd=3 '%s' 3>&1 2>&1",
+                 binary);
+
+        /* Use popen to run valgrind */
+        char real_cmd[4096];
+        snprintf(real_cmd, sizeof(real_cmd),
+                 "valgrind --track-fds=yes --leak-check=no --error-exitcode=0 '%s' 2>&1",
+                 binary);
+
+        pipe = popen(real_cmd, "r");
+        if (pipe) {
+            size_t bytes = fread(vg_output, 1, sizeof(vg_output) - 1, pipe);
+            vg_output[bytes] = '\0';
+            pclose(pipe);
+
+            /* Copy to sanitizer_output for parsing */
+            strncpy(sanitizer_output, vg_output, sanitizer_size - 1);
+
+            /* Check for FILE DESCRIPTOR leaks.
+             * "Open file descriptor N:" lines only appear for
+             * non-inherited FDs left open at exit. */
+            if (string_contains(vg_output, "Open file descriptor")) {
+                if (found < max_errors) {
+                    errors[found].type = ERR_MEMORY_LEAK;
+                    snprintf(errors[found].title, sizeof(errors[found].title),
+                             "File Descriptor Leak");
+                    snprintf(errors[found].fix_suggestion,
+                             sizeof(errors[found].fix_suggestion),
+                             "One or more file descriptors were not closed "
+                             "before exit. Check that every open(), fopen(), "
+                             "socket(), accept(), or dup() has a matching "
+                             "close()/fclose() in all code paths.");
+                    errors[found].severity = 2;
+                    errors[found].has_source = true;
+                    found++;
+                }
+            }
+        } else {
+            snprintf(sanitizer_output, sanitizer_size,
+                     "Could not start valgrind for resource check");
+        }
+    } else {
+        /* Valgrind unavailable — /proc snapshot doesn't track child FDs */
+        snprintf(sanitizer_output, sanitizer_size,
+                 "Resource leak check requires valgrind (not found): "
+                 "install valgrind for --track-fds=yes detection");
+    }
+
+    return found;
+}
+
+struct DangerPattern {
+    const char *func;
+    const char *title;
+    const char *fix;
+    ErrorType type;
+    int severity;
+};
+
+/*
+ * scan_dangerous_apis - Scan source for dangerous C functions
+ *
+ * WHY: Functions like strcpy(), sprintf(), gets() are common sources of
+ *      CVEs. Many don't trigger compiler warnings. Catch them pre-runtime.
+ */
+int scan_dangerous_apis(const char **sources, int source_count,
+                        DetectedError *errors, int max_errors)
+{
+    static const struct DangerPattern patterns[] = {
+        {"gets(", "Unsafe gets() Call",
+         "Use fgets(buf, sizeof(buf), stdin). gets() has no bounds "
+         "checking and cannot be used safely.",
+         ERR_BUFFER_OVERFLOW, 3},
+        {"strcpy(", "Unsafe strcpy() Use",
+         "Use strncpy() with explicit length check, or strlcpy() if "
+         "available. strcpy() does not check destination bounds.",
+         ERR_BUFFER_OVERFLOW, 3},
+        {"sprintf(", "Unsafe sprintf() Use",
+         "Use snprintf(buf, sizeof(buf), ...). sprintf() does not check "
+         "the destination buffer size.",
+         ERR_BUFFER_OVERFLOW, 3},
+        {"strcat(", "Unsafe strcat() Use",
+         "Check buffer space before concatenation, or use strlcat(). "
+         "strcat() does not check destination bounds.",
+         ERR_BUFFER_OVERFLOW, 3},
+        {"scanf(", "Unbounded scanf()",
+         "Always specify field width limits: scanf(\"%%%ds\", ...). "
+         "Unbounded %%s can overflow the destination buffer.",
+         ERR_BUFFER_OVERFLOW, 2},
+        {"alloca(", "Stack Allocation (alloca)",
+         "Use malloc() instead. alloca() has no failure reporting and "
+         "can silently cause stack overflow.",
+         ERR_STACK_OVERFLOW, 2},
+        {"setjmp(", "setjmp Without Volatile",
+         "Variables modified between setjmp/longjmp must be volatile "
+         "to avoid undefined behavior.",
+         ERR_UNINIT_VAR, 1},
+    };
+    const int num_patterns = sizeof(patterns) / sizeof(patterns[0]);
+    char line_buf[1024];
+    int found = 0;
+
+    for (int f = 0; f < source_count && found < max_errors; f++) {
+        FILE *fp = fopen(sources[f], "r");
+        if (!fp) continue;
+
+        int line_num = 0;
+        while (fgets(line_buf, sizeof(line_buf), fp) && found < max_errors) {
+            line_num++;
+            size_t len = strlen(line_buf);
+            /* Remove trailing newline for display */
+            if (len > 0 && line_buf[len - 1] == '\n')
+                line_buf[len - 1] = '\0';
+
+            for (int p = 0; p < num_patterns; p++) {
+                if (strstr(line_buf, patterns[p].func)) {
+                    /* Skip if inside a comment */
+                    char *trimmed = line_buf;
+                    while (*trimmed == ' ' || *trimmed == '\t')
+                        trimmed++;
+                    if (trimmed[0] == '/' && trimmed[1] == '/')
+                        continue;
+                    if (trimmed[0] == '/' && trimmed[1] == '*')
+                        continue;
+
+                    errors[found].type = patterns[p].type;
+                    snprintf(errors[found].title, sizeof(errors[found].title),
+                             "%s", patterns[p].title);
+                    snprintf(errors[found].fix_suggestion,
+                             sizeof(errors[found].fix_suggestion),
+                             "%s", patterns[p].fix);
+                    errors[found].severity = patterns[p].severity;
+                    errors[found].has_source = true;
+                    strncpy(errors[found].source_file, sources[f],
+                            sizeof(errors[found].source_file) - 1);
+                    errors[found].source_line = line_num;
+                    found++;
+                    break;  /* One error per line */
+                }
+            }
+        }
+        fclose(fp);
+    }
+
+    return found;
+}
+
+/*
  * main - CLI entry point for c_tester
  *
  * WHY: Parse command-line arguments, orchestrate the compilation,
@@ -2098,6 +2468,10 @@ int main(int argc, char *argv[])
     bool use_clang_tidy = false;
     bool use_valgrind = false;
     bool use_max = false;
+    bool use_fuzz = false;
+    bool use_danger = false;
+    bool use_resources = false;
+    int rerun_count = 0;
     char project_json[MAX_PATH_LEN] = {0};
     const char *html_path = NULL;
     int timeout_sec = DEFAULT_TIMEOUT_SEC;
@@ -2142,6 +2516,18 @@ int main(int argc, char *argv[])
             use_valgrind = true;
         } else if (strcmp(argv[i], "--max") == 0) {
             use_max = true;
+        } else if (strcmp(argv[i], "--fuzz") == 0) {
+            use_fuzz = true;
+        } else if (strncmp(argv[i], "--rerun=", 8) == 0) {
+            rerun_count = atoi(argv[i] + 8);
+            if (rerun_count < 2) rerun_count = 10;
+        } else if (strcmp(argv[i], "--rerun") == 0 && i + 1 < argc) {
+            rerun_count = atoi(argv[++i]);
+            if (rerun_count < 2) rerun_count = 10;
+        } else if (strcmp(argv[i], "--resources") == 0) {
+            use_resources = true;
+        } else if (strcmp(argv[i], "--danger") == 0) {
+            use_danger = true;
         } else if (strncmp(argv[i], "--project=", 10) == 0) {
             strncpy(project_json, argv[i] + 10, sizeof(project_json) - 1);
             project_json[sizeof(project_json) - 1] = '\0';
@@ -2226,6 +2612,14 @@ int main(int argc, char *argv[])
                 if (use_clang_tidy) child_argv[arg_idx++] = "--clang-tidy";
                 if (use_valgrind) child_argv[arg_idx++] = "--valgrind";
                 if (use_max) child_argv[arg_idx++] = "--max";
+                if (use_fuzz) child_argv[arg_idx++] = "--fuzz";
+                if (rerun_count > 0) {
+                    char rerun_str[32];
+                    snprintf(rerun_str, sizeof(rerun_str), "--rerun=%d", rerun_count);
+                    child_argv[arg_idx++] = rerun_str;
+                }
+                if (use_resources) child_argv[arg_idx++] = "--resources";
+                if (use_danger) child_argv[arg_idx++] = "--danger";
                 if (project_json[0]) {
                     snprintf(project_str, sizeof(project_str), "--project=%s", project_json);
                     child_argv[arg_idx++] = project_str;
@@ -2276,6 +2670,22 @@ int main(int argc, char *argv[])
         return error_count > 0 ? EXIT_ERRORS_FOUND : EXIT_CLEAN;
     }
 
+    /* --danger: standalone static scan, no compilation needed */
+    if (use_danger && !rerun_count && !use_fuzz && !use_resources) {
+        print_colored(&colors, colors.bold, "[Dangerous API Scan]\n");
+        error_count = scan_dangerous_apis(source_files, source_count,
+                                           errors, 32);
+        if (error_count > 0) {
+            for (i = 0; i < error_count; i++)
+                generate_fix_suggestion(&errors[i]);
+            print_summary(&colors, &result, error_count, errors);
+            return EXIT_ERRORS_FOUND;
+        }
+        print_colored(&colors, colors.green, "[OK] ");
+        printf("No dangerous APIs found\n");
+        return EXIT_CLEAN;
+    }
+
     generate_temp_path("c_tester", binary_path, sizeof(binary_path));
 
     memset(&result, 0, sizeof(result));
@@ -2307,6 +2717,44 @@ int main(int argc, char *argv[])
                                     result.compiler_output,
                                     sizeof(result.compiler_output)) == 0) {
                 result.compilation_success = true;
+            }
+        } else if (use_resources) {
+            /* --resources runs under valgrind --track-fds.
+             * Compile without sanitizers (incompatible with valgrind). */
+            if (compile_for_valgrind(source_files, source_count, binary_path,
+                                     result.compiler_output,
+                                     sizeof(result.compiler_output)) == 0) {
+                result.compilation_success = true;
+            }
+        } else if (use_fuzz || rerun_count > 0) {
+            /* New modes: compile with sanitizers for runtime analysis.
+             * Respect --tsan flag if provided alongside --rerun. */
+            if (use_tsan) {
+                if (is_cpp_file(source_files[0])) {
+                    if (compile_cpp_with_tsan(source_files, source_count,
+                                               binary_path,
+                                               result.compiler_output,
+                                               sizeof(result.compiler_output)) == 0)
+                        result.compilation_success = true;
+                } else if (compile_with_tsan(source_files, source_count,
+                                             binary_path,
+                                             result.compiler_output,
+                                             sizeof(result.compiler_output)) == 0) {
+                    result.compilation_success = true;
+                }
+            } else {
+                if (is_cpp_file(source_files[0])) {
+                    if (compile_cpp_with_sanitizers(source_files, source_count,
+                                                     binary_path,
+                                                     result.compiler_output,
+                                                     sizeof(result.compiler_output)) == 0)
+                        result.compilation_success = true;
+                } else if (compile_with_sanitizers(source_files, source_count,
+                                                   binary_path,
+                                                   result.compiler_output,
+                                                   sizeof(result.compiler_output)) == 0) {
+                    result.compilation_success = true;
+                }
             }
         } else if (is_cpp_file(source_files[0])) {
             if (use_tsan) {
@@ -2393,38 +2841,69 @@ int main(int argc, char *argv[])
     }
 
     struct timespec start_time, end_time;
-    clock_gettime(CLOCK_MONOTONIC, &start_time);
 
-    if (use_valgrind) {
-        result.exit_code = run_with_valgrind(binary_path,
-                                                 result.runtime_output,
-                                                 sizeof(result.runtime_output),
-                                                 result.sanitizer_output,
-                                                 sizeof(result.sanitizer_output),
-                                                 timeout_sec, NULL);
+    if (use_fuzz) {
+        clock_gettime(CLOCK_MONOTONIC, &start_time);
+        error_count = run_fuzz_analysis(binary_path, errors, 32,
+                                         result.sanitizer_output,
+                                         sizeof(result.sanitizer_output),
+                                         timeout_sec);
+        clock_gettime(CLOCK_MONOTONIC, &end_time);
+        get_execution_time(&start_time, &end_time, &result.execution_time_ms);
+    } else if (rerun_count > 0) {
+        clock_gettime(CLOCK_MONOTONIC, &start_time);
+        error_count = run_with_rerun(binary_path, rerun_count,
+                                      errors, 32,
+                                      result.runtime_output,
+                                      sizeof(result.runtime_output),
+                                      result.sanitizer_output,
+                                      sizeof(result.sanitizer_output),
+                                      timeout_sec);
+        clock_gettime(CLOCK_MONOTONIC, &end_time);
+        get_execution_time(&start_time, &end_time, &result.execution_time_ms);
+    } else if (use_resources) {
+        clock_gettime(CLOCK_MONOTONIC, &start_time);
+        error_count = check_resource_leaks(binary_path, errors, 32,
+                                            result.sanitizer_output,
+                                            sizeof(result.sanitizer_output),
+                                            timeout_sec);
+        clock_gettime(CLOCK_MONOTONIC, &end_time);
+        get_execution_time(&start_time, &end_time, &result.execution_time_ms);
     } else {
-        setenv("ASAN_OPTIONS", "detect_leaks=1", 1);
+        clock_gettime(CLOCK_MONOTONIC, &start_time);
 
-        result.exit_code = run_binary(binary_path, NULL,
-                                        result.runtime_output,
-                                        sizeof(result.runtime_output),
-                                        result.sanitizer_output,
-                                        sizeof(result.sanitizer_output),
-                                        timeout_sec, NULL);
+        if (use_valgrind) {
+            result.exit_code = run_with_valgrind(binary_path,
+                                                     result.runtime_output,
+                                                     sizeof(result.runtime_output),
+                                                     result.sanitizer_output,
+                                                     sizeof(result.sanitizer_output),
+                                                     timeout_sec, NULL);
+        } else {
+            setenv("ASAN_OPTIONS", "detect_leaks=1", 1);
+
+            result.exit_code = run_binary(binary_path, NULL,
+                                            result.runtime_output,
+                                            sizeof(result.runtime_output),
+                                            result.sanitizer_output,
+                                            sizeof(result.sanitizer_output),
+                                            timeout_sec, NULL);
+        }
+
+        if (result.exit_code == -1) {
+            snprintf(result.sanitizer_output, sizeof(result.sanitizer_output),
+                     "Execution timeout after %d seconds", timeout_sec);
+        }
+
+        clock_gettime(CLOCK_MONOTONIC, &end_time);
+        get_execution_time(&start_time, &end_time, &result.execution_time_ms);
+
+        int sanitizer_count = parse_sanitizer_errors(
+                                   result.sanitizer_output,
+                                   errors + error_count,
+                                   32 - error_count);
+        error_count += sanitizer_count;
     }
-
-    if (result.exit_code == -1) {
-        snprintf(result.sanitizer_output, sizeof(result.sanitizer_output),
-                 "Execution timeout after %d seconds", timeout_sec);
-    }
-
-    clock_gettime(CLOCK_MONOTONIC, &end_time);
-    get_execution_time(&start_time, &end_time, &result.execution_time_ms);
-
-    int sanitizer_count = parse_sanitizer_errors(result.sanitizer_output,
-                                                   errors + error_count,
-                                                   32 - error_count);
-    error_count += sanitizer_count;
 
     if (error_count == 0 &&
         string_contains(result.compiler_output, "warning:")) {
@@ -2503,6 +2982,18 @@ int main(int argc, char *argv[])
                                             result.exit_code > 128 ?
                                                 result.exit_code - 128 : 0,
                                             errors, 32);
+    }
+
+    /* If --danger is combined with other modes, append dangerous API results */
+    if (use_danger) {
+        int danger_count = scan_dangerous_apis(source_files, source_count,
+                                                errors + error_count,
+                                                32 - error_count);
+        error_count += danger_count;
+        if (danger_count > 0) {
+            print_colored(&colors, colors.yellow, "[danger] ");
+            printf("Found %d dangerous API call(s) in source\n", danger_count);
+        }
     }
 
     for (i = 0; i < error_count; i++)

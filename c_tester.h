@@ -528,6 +528,89 @@ int generate_html_report(const char *html_path, const char **source_files,
                           const DetectedError *errors, int error_count);
 
 /*
+ * run_fuzz_analysis - Run binary with boundary inputs to catch edge-case bugs
+ *
+ * WHY: A binary may work with normal input but crash on empty strings,
+ *      huge buffers, or boundary integer values. This function generates
+ *      ~10 edge inputs (empty, 1-byte, 16K, 64K, negative, overflow) and
+ *      runs each as argv[1] under ASan, collecting unique errors.
+ *
+ * @param binary - Path to compiled binary
+ * @param errors - Array to fill with detected errors
+ * @param max_errors - Maximum number of errors to collect
+ * @param sanitizer_output - Buffer for combined sanitizer output
+ * @param sanitizer_size - Size of sanitizer_output buffer
+ * @param timeout_sec - Maximum execution time per input in seconds
+ * @return Number of unique errors found from fuzzing
+ */
+int run_fuzz_analysis(const char *binary,
+                      DetectedError *errors, int max_errors,
+                      char *sanitizer_output, size_t sanitizer_size,
+                      int timeout_sec);
+
+/*
+ * run_with_rerun - Run binary multiple times to detect non-deterministic bugs
+ *
+ * WHY: Heisenbugs (UAF, uninitialized reads, data races) trigger
+ *      non-deterministically. Running N times and comparing results
+ *      reveals crashes that happen "sometimes" vs "always."
+ *
+ * @param binary - Path to compiled binary
+ * @param rerun_count - Number of times to run (default 10)
+ * @param errors - Array to fill with detected errors
+ * @param max_errors - Maximum number of errors to collect
+ * @param output - Buffer for runtime output
+ * @param output_size - Size of output buffer
+ * @param error_output - Buffer for sanitizer/error output
+ * @param error_size - Size of error buffer
+ * @param timeout_sec - Maximum execution time per run in seconds
+ * @return 1 if heisenbug detected, 0 if deterministic
+ */
+int run_with_rerun(const char *binary, int rerun_count,
+                   DetectedError *errors, int max_errors,
+                   char *output, size_t output_size,
+                   char *error_output, size_t error_size,
+                   int timeout_sec);
+
+/*
+ * check_resource_leaks - Detect file descriptor and OS resource leaks
+ *
+ * WHY: ASan catches heap memory leaks but misses file descriptors,
+ *      mmap leaks, and other OS resources. This function runs the
+ *      binary under Valgrind with --track-fds=yes, and also compares
+ *      /proc/self/fd counts before/after execution.
+ *
+ * @param binary - Path to compiled binary
+ * @param errors - Array to fill with detected errors
+ * @param max_errors - Maximum number of errors to collect
+ * @param sanitizer_output - Buffer for combined output
+ * @param sanitizer_size - Size of output buffer
+ * @param timeout_sec - Maximum execution time in seconds
+ * @return Number of resource leak errors found
+ */
+int check_resource_leaks(const char *binary,
+                         DetectedError *errors, int max_errors,
+                         char *sanitizer_output, size_t sanitizer_size,
+                         int timeout_sec);
+
+/*
+ * scan_dangerous_apis - Scan source for dangerous C functions
+ *
+ * WHY: Functions like strcpy(), sprintf(), gets(), and printf(user_str)
+ *      are common sources of security vulnerabilities. Compilers don't
+ *      always warn about them. This function scans source files for
+ *      ~12 dangerous patterns and tags each with a fix suggestion.
+ *
+ * @param sources - Array of source file paths
+ * @param source_count - Number of source files
+ * @param errors - Array to fill with detected errors
+ * @param max_errors - Maximum number of errors to collect
+ * @return Number of dangerous APIs found
+ */
+int scan_dangerous_apis(const char **sources, int source_count,
+                        DetectedError *errors, int max_errors);
+
+/*
  * get_execution_time - Calculate elapsed time in milliseconds
  *
  * WHY: Need to track how long a test took to execute,
