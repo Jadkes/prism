@@ -15,6 +15,8 @@
 
 #include "c_tester.h"
 #include "ast_backend.h"
+#include "check_engine.h"
+#include "annotation.h"
 
 /*
  * compile_with_sanitizers - Compile source files with ASan and UBSan
@@ -4246,7 +4248,8 @@ int main(int argc, char *argv[])
 
     /* Parallel processing with fork() + waitpid() */
     /* Checking parallel mode availability */
-    if (jobs > 1 && source_count > 1) {
+    /* NOTE: --ast mode processes all files in-process, skip fork path */
+    if (!use_ast && jobs > 1 && source_count > 1) {
         int active_children = 0;
         int total_errors = 0;
 
@@ -4493,6 +4496,39 @@ int main(int argc, char *argv[])
         }
 
         error_count = ast_total;
+
+        /* Run flow-aware check modules (Phase 3) on the source files */
+        if (error_count < 32) {
+            DetectedError check_errs[32];
+            int n_check = 0;
+            AnnotationDB *ann = ann_load(NULL);
+            if (!ann) {
+                printf("  \033[33mWarning:\033[0m Could not load annotation "
+                       "DB — checks disabled\n");
+            } else {
+                for (int fi = 0; fi < source_count && n_check < 32; fi++) {
+                    ASTContext *actx = ast_parse(source_files[fi], NULL);
+                    if (!actx) continue;
+                    int ce = check_engine_run(actx, ann,
+                                               check_errs + n_check,
+                                               32 - n_check);
+                    for (int cj = 0; cj < ce && n_check < 32; cj++) {
+                        n_check++;
+                    }
+                    ast_free(actx);
+                }
+                ann_free(ann);
+            }
+
+            /* Merge check engine results */
+            unsigned int cmode = 2u;
+            for (int cj = 0; cj < n_check && error_count < 32; cj++) {
+                error_count = merge_analysis_error(errors, error_count, 32,
+                                                    &check_errs[cj],
+                                                    ast_modes, cmode);
+            }
+        }
+
         if (error_count > 0) {
             for (i = 0; i < error_count; i++)
                 generate_fix_suggestion(&errors[i]);
