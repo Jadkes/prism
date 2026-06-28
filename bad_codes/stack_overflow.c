@@ -1,2 +1,0 @@
-void recurse(void) { recurse(); }
-int main(void) { recurse(); return 0; }

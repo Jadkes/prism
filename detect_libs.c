@@ -1,20 +1,8 @@
 /*
- * detect_libs.c - Auto-detect library dependencies from C/C++ source headers
+ * detect_libs.c - Auto-detect library deps from #include directives
  *
- * Purpose: Scans source files for #include <...> directives and maps them to
- *          linker flags via a 50+ entry lookup table and pkg-config fallback.
- *
- * Design:
- *   - Phase 1: scan source for #include <header.h> lines
- *   - Phase 2: look up each header in the known-header table (ordered by name)
- *   - Phase 3: for headers with a pkg-config name, verify with pkg-config(1)
- *   - Phase 4: build a combined flags string, deduped by flag value
- *
- *   Phase 2 and 3 results are OR'd together: pkg-config output (when available)
- *   replaces the raw flags for that entry; entries without a pkg-config name
- *   use their raw flags directly.
- *
- * Thread-safety: Single-threaded tool, no concurrency concerns.
+ * Passes through: scan sources → table lookup → pkg-config fallback →
+ * deduped flags string. Built-in 50-entry table covers common libs.
  */
 
 #include "detect_libs.h"
@@ -24,7 +12,7 @@
 #include <string.h>
 #include <unistd.h>
 
-/* ─── Known-Header Mapping Table ───────────────────────────────────────── */
+/* Known-header mapping table */
 
 struct LibEntry {
     const char *header;          /* e.g. "gmp.h" (exact match, no path) */
@@ -150,20 +138,14 @@ static const struct LibEntry lib_table[] = {
 
 static const int lib_table_count = sizeof(lib_table) / sizeof(lib_table[0]);
 
-/* ─── The caching buffer ──────────────────────────────────────────────── */
+/* Caching buffer — results survive for get_detected_libs() */
 
 static char g_cached_flags[4096] = "";
 static bool g_initialized = false;
 
-/* ─── Internal helpers ────────────────────────────────────────────────── */
+/* Internal helpers */
 
-/*
- * is_standard_header - Skip headers that are part of the C/C++ standard lib
- *
- * WHY: Headers like <stdio.h>, <stdlib.h>, <string.h> are provided by the
- *      compiler itself and do not need -l flags.  We also skip compiler
- *      builtins and C++ standard headers.
- */
+/* True if header is in the C/C++ standard library (compiler provides it) */
 static bool is_standard_header(const char *header)
 {
     /* C standard library headers (ISO C) */
@@ -223,18 +205,7 @@ static bool is_standard_header(const char *header)
     return false;
 }
 
-/*
- * resolve_pkg_config - Try pkg-config for a package, return flags
- *
- * WHY: For libraries installed via package managers, pkg-config gives the
- *      exact compiler and linker flags.  This is more reliable than guessing
- *      because it accounts for architecture-specific paths and dependencies.
- *
- * @param pkg_name - pkg-config package name (e.g. "gmp")
- * @param output   - Buffer for flags (e.g. "-I/usr/include -lgmp")
- * @param size     - Size of output buffer
- * @return 0 if pkg-config succeeded, -1 if not found
- */
+/* Run pkg-config for a package; return 0 on success, -1 if not found */
 static int resolve_pkg_config(const char *pkg_name, char *output, size_t size)
 {
     if (!pkg_name || !pkg_name[0])
@@ -262,20 +233,7 @@ static int resolve_pkg_config(const char *pkg_name, char *output, size_t size)
     return 0;
 }
 
-/*
- * extract_headers - Parse source file and collect #include <...> headers
- *
- * WHY: Rather than tokenizing C properly (which requires a full preprocessor),
- *      we do a simple line-by-line scan for `#include <...>` patterns. This
- *      catches the common case and avoids false positives from comments or
- *      strings (since #include inside C-style block comments would be in a
- *      string literal in practice, but we still skip lines with // markers).
- *
- * @param fp         - Open file pointer
- * @param headers    - Output array of header strings (pointers into static buf)
- * @param max_headers - Capacity of headers array
- * @return Number of headers found
- */
+/* Parse a source file and collect all #include <...> header names */
 static int extract_headers(FILE *fp, const char *headers[], int max_headers)
 {
     static char line_buf[65536];
@@ -328,28 +286,14 @@ static int extract_headers(FILE *fp, const char *headers[], int max_headers)
     return count;
 }
 
-/*
- * flag_already_present - Check if a flag is already in the accumulator
- *
- * WHY: Multiple headers may map to the same library (e.g. <zlib.h> and
- *      <zconf.h> both need -lz).  Dedup avoids passing -lz -lz to gcc.
- */
+/* Dedup: check if a flag is already in the accumulator */
 static bool flag_already_present(const char *accum, const char *flag)
 {
     if (!accum || !flag) return false;
     return strstr(accum, flag) != NULL;
 }
 
-/*
- * append_flags_for_header - Add linker flags for one header to accumulator
- *
- * WHY: For each non-standard header, look up in the known table. If the entry
- *      has a pkg-config name, try that first; fall back to raw flags.
- *
- * @param header  - Header name from #include <...>
- * @param accum   - Running accumulator buffer
- * @param acc_size - Size of accumulator
- */
+/* Look up one header in the table and append its flags to the accumulator */
 static void append_flags_for_header(const char *header,
                                      char *accum, size_t acc_size)
 {
@@ -357,7 +301,7 @@ static void append_flags_for_header(const char *header,
     if (!header || strlen(header) < 3)
         return;
 
-    /* Check against the known table */
+    /* Look up in the header table */
     for (int i = 0; i < lib_table_count; i++) {
         /* Match against the full header path from <...> */
         if (strcmp(header, lib_table[i].header) != 0)
@@ -366,13 +310,12 @@ static void append_flags_for_header(const char *header,
         const char *flags = NULL;
         char pkg_buf[4096] = "";
 
-        /* Try pkg-config first */
+        /* Prefer pkg-config over raw flags */
         if (lib_table[i].pkg_config &&
             resolve_pkg_config(lib_table[i].pkg_config, pkg_buf, sizeof(pkg_buf)) == 0) {
             flags = pkg_buf;
         } else {
-            /* Fall back to raw flags — skip empty entries (standard headers
-             * that alias to something in the table for documentation) */
+            /* Fall back to raw flags; skip empty entries */
             if (lib_table[i].raw_flags[0] == '\0')
                 return;
             flags = lib_table[i].raw_flags;
@@ -396,10 +339,9 @@ static void append_flags_for_header(const char *header,
         return;  /* Found a match */
     }
 
-    /* No table entry — try pkg-config on the bare header name as a last resort.
-     * e.g., <foo.h> → `pkg-config --cflags --libs foo` */
+    /* Not in the table — try pkg-config on the bare header name as a guess */
     {
-        /* Strip directory prefix and .h suffix for pkg-config guess */
+        /* Strip dir prefix and .h to make a pkg-config name */
         const char *base = strrchr(header, '/');
         if (base) base++; else base = header;
 
@@ -431,7 +373,7 @@ static void append_flags_for_header(const char *header,
     }
 }
 
-/* ─── Public API ───────────────────────────────────────────────────────── */
+/* Public API */
 
 int detect_libraries(const char **sources, int source_count,
                      char *output, size_t output_size)
@@ -471,7 +413,7 @@ int detect_libraries(const char **sources, int source_count,
     strncpy(output, src, output_size - 1);
     output[output_size - 1] = '\0';
 
-    /* Cache for get_detected_libs() */
+    /* Cache it so get_detected_libs() works */
     strncpy(g_cached_flags, output, sizeof(g_cached_flags) - 1);
     g_cached_flags[sizeof(g_cached_flags) - 1] = '\0';
     g_initialized = true;

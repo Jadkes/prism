@@ -1,12 +1,8 @@
 /*
- * ast_backend.c - libclang AST backend implementation
+ * ast_backend.c - libclang AST backend
  *
- * Purpose: Wraps libclang's C API to parse C source files and traverse
- *          the AST cursor tree. Collects dangerous function calls,
- *          function definitions, and all call sites in a single pass.
- *
- * Design: One-pass AST traversal during ast_parse() collects everything.
- *         Query functions return from pre-populated arrays.
+ * One-pass cursor traversal during ast_parse() collects calls, function
+ * defs, and call sites. Query functions just read from pre-populated arrays.
  */
 
 #include "ast_backend.h"
@@ -15,7 +11,7 @@
 #include <string.h>
 #include <stdio.h>
 
-/* ---- Internal data structures ---- */
+/* Internal data structures */
 
 struct ASTContext {
     CXIndex index;
@@ -39,7 +35,7 @@ struct ASTContext {
     int call_count;
 };
 
-/* ---- Dangerous function pattern table ---- */
+/* Dangerous function pattern table */
 
 typedef struct {
     const char *name;
@@ -91,7 +87,7 @@ static const DangerPattern dangerous_funcs[] = {
 static const int num_dangerous = sizeof(dangerous_funcs)
                                  / sizeof(dangerous_funcs[0]);
 
-/* ---- Helpers ---- */
+/* Helpers */
 
 static const DangerPattern *match_dangerous(const char *name)
 {
@@ -102,7 +98,7 @@ static const DangerPattern *match_dangerous(const char *name)
     return NULL;
 }
 
-/* Get source location info from a cursor. Returns false if unavailable. */
+/* Grab source location from a cursor; returns false if unavailable */
 static bool get_cursor_location(CXCursor cursor,
                                  char *file_buf, size_t file_size,
                                  unsigned *line, unsigned *column)
@@ -125,7 +121,7 @@ static bool get_cursor_location(CXCursor cursor,
     return true;
 }
 
-/* Grow a dynamically-allocated array. Returns 0 on failure. */
+/* Grow a dynamic array; returns 0 on success, -1 on OOM */
 #define GROW_ARRAY(ptr, cap, count, elem_size) \
     (((count) < (cap)) ? 0 : grow_array_impl((void**)&(ptr), &(cap), \
                                               (elem_size)))
@@ -140,7 +136,7 @@ static int grow_array_impl(void **ptr, int *cap, size_t elem_size)
     return 0;
 }
 
-/* ---- AST cursor visitor ---- */
+/* AST cursor visitor */
 
 static enum CXChildVisitResult visit_cursor(CXCursor cursor,
                                              CXCursor parent,
@@ -150,7 +146,7 @@ static enum CXChildVisitResult visit_cursor(CXCursor cursor,
     ASTContext *ctx = (ASTContext *)data;
     int kind = (int)clang_getCursorKind(cursor);
 
-    /* Track function definitions */
+    /* Collect function definitions */
     if (kind == (int)CXCursor_FunctionDecl) {
         CXString name = clang_getCursorSpelling(cursor);
         const char *nstr = clang_getCString(name);
@@ -178,7 +174,7 @@ static enum CXChildVisitResult visit_cursor(CXCursor cursor,
             }
         }
 
-        /* Update current function for call site tracking */
+        /* Track which function we're inside for call site attribution */
         if (nstr)
             strncpy(ctx->current_function, nstr,
                     sizeof(ctx->current_function) - 1);
@@ -187,7 +183,7 @@ static enum CXChildVisitResult visit_cursor(CXCursor cursor,
         return CXChildVisit_Recurse;
     }
 
-    /* Track function calls */
+    /* Collect call expressions */
     if (kind == (int)CXCursor_CallExpr) {
         CXCursor callee = clang_getCursorReferenced(cursor);
         CXString cname = clang_getCursorSpelling(callee);
@@ -198,7 +194,7 @@ static enum CXChildVisitResult visit_cursor(CXCursor cursor,
             unsigned line = 0, col = 0;
             if (get_cursor_location(cursor, file, sizeof(file),
                                      &line, &col)) {
-                /* Record in all_calls for later lookup */
+                /* Stash in all_calls for later lookup by name */
                 if (grow_array_impl((void**)&ctx->all_calls,
                                     &ctx->call_cap,
                                     sizeof(CallSite)) == 0) {
@@ -213,7 +209,7 @@ static enum CXChildVisitResult visit_cursor(CXCursor cursor,
                     ctx->all_calls[cidx].column = col;
                 }
 
-                /* Check if this is a dangerous function */
+                /* Also check against the dangerous-pattern table */
                 const DangerPattern *dp = match_dangerous(cstr);
                 if (dp) {
                     if (grow_array_impl((void**)&ctx->dangerous_calls,
@@ -240,11 +236,10 @@ static enum CXChildVisitResult visit_cursor(CXCursor cursor,
         return CXChildVisit_Recurse;
     }
 
-    /* Recurse into compound statements, functions, etc. */
     return CXChildVisit_Recurse;
 }
 
-/* ---- Public API ---- */
+/* Public API */
 
 ASTContext *ast_parse(const char *source_file, const char **compiler_args)
 {
@@ -258,10 +253,10 @@ ASTContext *ast_parse(const char *source_file, const char **compiler_args)
             sizeof(ctx->user_source_file) - 1);
     ctx->current_function[0] = '\0';
 
-    /* Create index (1 = exclude PCH from diagnostics) */
+    /* Create clang index, excluding PCH from diagnostics */
     ctx->index = clang_createIndex(1, 0);
 
-    /* Build clang argv */
+    /* Build clang command-line arguments */
     enum { MAX_CLANG_ARGS = 64 };
     const char *argv[MAX_CLANG_ARGS];
     int argc = 0;
@@ -275,7 +270,7 @@ ASTContext *ast_parse(const char *source_file, const char **compiler_args)
         argv[argc++] = "-xc";
 
     argv[argc++] = "-std=gnu11";
-    argv[argc++] = "-w";   /* suppress clang's own warnings (we want AST) */
+    argv[argc++] = "-w";   /* shut up clang's own warnings — we want the AST */
     argv[argc++] = "-I.";
 
     /* Append user compiler_args */
@@ -286,7 +281,7 @@ ASTContext *ast_parse(const char *source_file, const char **compiler_args)
 
     argv[argc] = NULL;
 
-    /* Parse translation unit */
+    /* Fire up the libclang parser */
     unsigned tu_flags = CXTranslationUnit_KeepGoing |
                         CXTranslationUnit_VisitImplicitAttributes;
 
@@ -300,7 +295,7 @@ ASTContext *ast_parse(const char *source_file, const char **compiler_args)
         return NULL;
     }
 
-    /* Single-pass traversal to collect everything */
+    /* One traversal pass to collect everything */
     CXCursor cursor = clang_getTranslationUnitCursor(ctx->tu);
     clang_visitChildren(cursor, visit_cursor, ctx);
 
@@ -328,7 +323,7 @@ int ast_get_dangerous_calls(ASTContext *ctx,
 
     int written = 0;
     for (int i = 0; i < ctx->dangerous_count && written < max; i++) {
-        /* Only return findings from user's source file */
+        /* Filter to only the user's source file — skip system headers */
         if (strcmp(ctx->dangerous_calls[i].source_file,
                    ctx->user_source_file) != 0)
             continue;

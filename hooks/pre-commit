@@ -1,11 +1,11 @@
 #!/bin/bash
-# pre-commit - Git pre-commit hook for c_tester
+# pre-commit - Git pre-commit hook for prism
 #
-# Purpose: Runs c_tester on all staged .c/.cpp files
+# Purpose: Runs prism on all staged .c/.cpp files
 #          and blocks the commit if errors are found.
 #
 # Design: Uses git diff --cached to find staged files,
-#         then runs c_tester on each. If any file has
+#         then runs prism on each. If any file has
 #         errors, the commit is blocked (exit 1).
 
 # Get staged .c and .cpp files
@@ -15,16 +15,16 @@ if [ -z "$files" ]; then
     exit 0
 fi
 
-echo "Running c_tester on staged files..."
+echo "Running prism on staged files..."
 echo ""
 
 for f in $files; do
     echo "Checking: $f"
-    output=$(./c_tester "$f" 2>&1)
+    output=$(./prism "$f" 2>&1)
     result=$?
 
     if [ $result -ne 0 ]; then
-        echo "c_tester found errors in $f"
+        echo "prism found errors in $f"
         echo "$output"
         echo ""
         echo "Commit blocked. Fix errors before committing."

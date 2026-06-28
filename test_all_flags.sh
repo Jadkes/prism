@@ -1,20 +1,20 @@
 #!/bin/bash
 #
-# test_all_flags.sh - Test c_tester with all available flags
+# test_all_flags.sh - Test prism with all available flags
 #
-# Runs c_tester with each flag on hell_code.c and shows the results
+# Runs prism with each flag on hell_code.c and shows the results
 
-C_TESTER="./c_tester"
+C_TESTER="./prism"
 TEST_FILE="hell_code.c"
 
 echo "========================================"
-echo "  c_tester - Full Flag Test Suite"
+echo "  prism - Full Flag Test Suite"
 echo "========================================"
 echo ""
 
-# Check c_tester exists
+# Check prism exists
 if [ ! -x "$C_TESTER" ]; then
-    echo "Error: c_tester not found or not executable"
+    echo "Error: prism not found or not executable"
     exit 1
 fi
 

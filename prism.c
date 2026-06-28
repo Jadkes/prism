@@ -1,19 +1,17 @@
 /*
- * c_tester.c - Core engine for c_tester, a simple C/C++ error detection tool
+ * prism.c - Core engine for prism, a simple C/C++ error detection tool
  *
- * Purpose: Compiles C/C++ source files with GCC/G++ sanitizers (ASan/UBSan),
+ * Compiles C/C++ source files with GCC/G++ sanitizers (ASan/UBSan),
  *          runs them with timeout, captures output, and provides the
  *          foundation for error detection and fix suggestions.
  *
- * Design: Uses popen() for compilation output capture, fork()/execvp()/select()
+ * Uses popen() for compilation output capture, fork()/execvp()/select()
  *         for binary execution with timeout. Falls back to non-sanitizer
  *         compilation when sanitizer libraries are unavailable.
  *         Auto-detects language from file extension (.c vs .cpp/.cxx/.cc).
- *
- * Thread-safety: Single-threaded tool, no concurrency concerns.
  */
 
-#include "c_tester.h"
+#include "prism.h"
 #include "ast_backend.h"
 #include "check_engine.h"
 #include "annotation.h"
@@ -24,18 +22,8 @@
 #include <stdint.h>
 #include "detect_libs.h"
 
-/*
+/**
  * compile_with_sanitizers - Compile source files with ASan and UBSan
- *
- *      miss. ASan catches memory errors, UBSan catches undefined behavior.
- *      Supports multiple source files compiled into a single binary.
- *
- * @param sources - Array of paths to C source files
- * @param source_count - Number of source files
- * @param binary - Output binary path
- * @param output - Buffer for compiler output
- * @param output_size - Size of output buffer
- * @return 0 on success, non-zero on failure
  */
 int compile_with_sanitizers(const char **sources, int source_count,
                              const char *binary,
@@ -77,17 +65,6 @@ int compile_with_sanitizers(const char **sources, int source_count,
 
 /** 
  * compile_with_tsan - Compile source files with ThreadSanitizer
- *
- *      ASan and TSan are mutually exclusive, so we use a separate function.
- *      -fno-omit-frame-pointer is required for useful stack traces.
- *      Supports multiple source files compiled into a single binary.
- *
- * @param sources - Array of paths to C source files
- * @param source_count - Number of source files
- * @param binary - Output binary path
- * @param output - Buffer for compiler output
- * @param output_size - Size of output buffer
- * @return 0 on success, non-zero on failure
  */
 int compile_with_tsan(const char **sources, int source_count,
                        const char *binary,
@@ -129,16 +106,6 @@ int compile_with_tsan(const char **sources, int source_count,
 
 /*
  * compile_fallback - Compile without sanitizers as fallback
- *
- *      compilation with -Wall -Wextra for basic error detection.
- *      Supports multiple source files compiled into a single binary.
- *
- * @param sources - Array of paths to C source files
- * @param source_count - Number of source files
- * @param binary - Output binary path
- * @param output - Buffer for compiler output
- * @param output_size - Size of output buffer
- * @return 0 on success, non-zero on failure
  */
 int compile_fallback(const char **sources, int source_count,
                       const char *binary,
@@ -180,16 +147,6 @@ int compile_fallback(const char **sources, int source_count,
 
 /*
  * compile_for_valgrind - Compile for Valgrind analysis
- *
- *      -O2 optimization can eliminate dead code (unused malloc results),
- *      making memory leaks invisible to Valgrind.
- *
- * @param sources - Array of paths to C source files
- * @param source_count - Number of source files
- * @param binary - Output binary path
- * @param output - Buffer for compiler output
- * @param output_size - Size of output buffer
- * @return 0 on success, non-zero on failure
  */
 int compile_for_valgrind(const char **sources, int source_count,
                          const char *binary, char *output, size_t output_size)
@@ -230,15 +187,6 @@ int compile_for_valgrind(const char **sources, int source_count,
 
 /*
  * compile_for_warnings - Compile with warning flags only (no sanitizers)
- *
- *      A separate warning-only pass catches these at -O2 optimization.
- *      Supports multiple source files.
- *
- * @param sources - Array of paths to C source files
- * @param source_count - Number of source files
- * @param output - Buffer for compiler output
- * @param output_size - Size of output buffer
- * @return 0 on success, non-zero on failure
  */
 int compile_for_warnings(const char **sources, int source_count,
                          char *output, size_t output_size)
@@ -276,16 +224,6 @@ int compile_for_warnings(const char **sources, int source_count,
 
 /*
  * compile_cpp_with_sanitizers - Compile C++ sources with ASan and UBSan
- *
- *      C++ sanitizer output may include std::error messages.
- *      Supports multiple source files compiled into a single binary.
- *
- * @param sources - Array of paths to C++ source files
- * @param source_count - Number of source files
- * @param binary - Output binary path
- * @param output - Buffer for compiler output
- * @param output_size - Size of output buffer
- * @return 0 on success, non-zero on failure
  */
 int compile_cpp_with_sanitizers(const char **sources, int source_count,
                                   const char *binary,
@@ -327,16 +265,6 @@ int compile_cpp_with_sanitizers(const char **sources, int source_count,
 
 /*
  * compile_cpp_with_tsan - Compile C++ sources with ThreadSanitizer
- *
- *      ASan and TSan are mutually exclusive.
- *      Supports multiple source files compiled into a single binary.
- *
- * @param sources - Array of paths to C++ source files
- * @param source_count - Number of source files
- * @param binary - Output binary path
- * @param output - Buffer for compiler output
- * @param output_size - Size of output buffer
- * @return 0 on success, non-zero on failure
  */
 int compile_cpp_with_tsan(const char **sources, int source_count,
                             const char *binary,
@@ -377,17 +305,6 @@ int compile_cpp_with_tsan(const char **sources, int source_count,
 
 /*
  * compile_with_analyzer - Compile with GCC static analyzer (-fanalyzer)
- *
- *      data flow analysis without running the code. Catches leaks,
- *      use-after-free, double-free, NULL deref, buffer overflows
- *      at compile time. Requires no runtime execution.
- *
- * @param sources - Array of paths to C source files
- * @param source_count - Number of source files
- * @param binary - Output binary path
- * @param output - Buffer for compiler output
- * @param output_size - Size of output buffer
- * @return 0 on success, non-zero on failure
  */
 int compile_with_analyzer(const char **sources, int source_count,
                       const char *binary,
@@ -429,16 +346,6 @@ int compile_with_analyzer(const char **sources, int source_count,
 
 /*
  * compile_with_clang_tidy - Run clang-tidy static analysis on source files
- *
- *      the code. It catches bugprone patterns, concurrency issues,
- *      cert security issues, and clang-analyzer checks at source level.
- *      Unlike -fanalyzer, it has a broader set of checks.
- *
- * @param sources - Array of paths to C/C++ source files
- * @param source_count - Number of source files
- * @param output - Buffer for clang-tidy output
- * @param output_size - Size of output buffer
- * @return 0 if clang-tidy ran successfully, non-zero on failure
  */
 int compile_with_clang_tidy(const char **sources, int source_count,
                             char *output, size_t output_size)
@@ -485,14 +392,6 @@ int compile_with_clang_tidy(const char **sources, int source_count,
 
 /*
  * compile_cpp_for_warnings - Compile C++ with warning flags only
- *
- *      Supports multiple source files.
- *
- * @param sources - Array of paths to C++ source files
- * @param source_count - Number of source files
- * @param output - Buffer for compiler output
- * @param output_size - Size of output buffer
- * @return 0 on success, non-zero on failure
  */
 int compile_cpp_for_warnings(const char **sources, int source_count,
                               char *output, size_t output_size)
@@ -582,19 +481,6 @@ static void on_sigint_timeout(int sig)
 
 /*
  * run_with_timeout - Shared helper: pipe/fork/execvp/select/read
- *
- *      identical pipe, fork, select-loop, and read logic.
- *      Caller builds argv[] and passes it; this function does the rest.
- *
- * @param binary - Path to binary (first arg to execvp)
- * @param argv - Full argument vector (including argv[0])
- * @param output - Buffer for stdout
- * @param output_size - Size of output buffer
- * @param error_output - Buffer for stderr
- * @param error_size - Size of error buffer
- * @param timeout_sec - Maximum execution time in seconds
- * @param child_pid - Output: PID of child process
- * @return Exit code of child, 128+sig if signaled, or -1 on failure/timeout
  */
 int run_with_timeout(const char *binary, char *const argv[],
                     char *output, size_t output_size,
@@ -806,18 +692,6 @@ int run_binary(const char *binary, const char *args,
 
 /*
  * run_with_valgrind - Execute binary under Valgrind for memory error detection
- *
- *      particularly uninitialized reads and subtle memory leaks.
- *      Runs much slower (10-50x) but provides complementary coverage.
- *
- * @param binary - Path to binary to execute under Valgrind
- * @param output - Buffer for runtime output (stdout)
- * @param output_size - Size of output buffer
- * @param error_output - Buffer for Valgrind output (stderr)
- * @param error_size - Size of error buffer
- * @param timeout_sec - Maximum execution time in seconds
- * @param child_pid - Output: PID of child process
- * @return Exit code of Valgrind/binary, or -1 on failure/timeout
  */
 int run_with_valgrind(const char *binary,
                        char *output, size_t output_size,
@@ -847,7 +721,7 @@ int run_with_valgrind(const char *binary,
  */
 char *generate_temp_path(const char *prefix, char *buffer, size_t buffer_size)
 {
-    snprintf(buffer, buffer_size, "/tmp/c_tester_%s_XXXXXX", prefix);
+    snprintf(buffer, buffer_size, "/tmp/prism_%s_XXXXXX", prefix);
     int fd = mkstemp(buffer);
     if (fd >= 0) {
         close(fd);
@@ -1176,12 +1050,6 @@ static const int num_patterns = sizeof(error_patterns) / sizeof(error_patterns[0
 
 /*
  * classify_error - Determine error pattern index from error line
- *
- *      the type of error (e.g., "heap-buffer-overflow").
- *      Returns pattern index so caller gets correct title/fix.
- *
- * @param error_line - Single line from sanitizer output
- * @return Pattern index (0..num_patterns-1), or -1 if no match
  */
 int classify_error(const char *error_line)
 {
@@ -1521,7 +1389,7 @@ void print_banner(const ColorCodes *colors, const char **source_files, int sourc
         return;
 
     printf("========================================\n");
-    print_colored(colors, colors->bold, "  c_tester - C Error Detection Tool\n");
+    print_colored(colors, colors->bold, "  prism - C Error Detection Tool\n");
     printf("========================================\n");
     print_colored(colors, colors->cyan, "Testing: ");
 
@@ -1734,7 +1602,7 @@ int generate_html_report(const char *html_path, const char **source_files,
     fprintf(fp, "<!DOCTYPE html>\n");
     fprintf(fp, "<html>\n<head>\n");
     fprintf(fp, "  <meta charset=\"utf-8\">\n");
-    fprintf(fp, "  <title>c_tester Report - %s</title>\n", primary_source);
+    fprintf(fp, "  <title>prism Report - %s</title>\n", primary_source);
     fprintf(fp, "  <style>\n");
     fprintf(fp, "    body { font-family: monospace; max-width: 800px; margin: 2em auto; padding: 0 1em; }\n");
     fprintf(fp, "    h1 { border-bottom: 2px solid #333; padding-bottom: 0.5em; }\n");
@@ -1748,7 +1616,7 @@ int generate_html_report(const char *html_path, const char **source_files,
     fprintf(fp, "    .status-error { color: #e74c3c; font-weight: bold; }\n");
     fprintf(fp, "  </style>\n");
     fprintf(fp, "</head>\n<body>\n");
-    fprintf(fp, "  <h1>c_tester Report</h1>\n");
+    fprintf(fp, "  <h1>prism Report</h1>\n");
     fprintf(fp, "  <p class=\"meta\">File(s): ");
     for (i = 0; i < source_count; i++) {
         fprintf(fp, "%s", source_files[i]);
@@ -1803,18 +1671,6 @@ int generate_html_report(const char *html_path, const char **source_files,
 
 /*
  * merge_analysis_error - Add or update error with location-aware dedup
- *
- *      of the same type. Dedup by (type + file + line) so distinct errors
- *      at different locations are all reported, while the same error found
- *      by multiple modes is merged with combined mode tracking.
- *
- * @param errors - Global error array
- * @param total_errors - Current count in errors[]
- * @param max_errors - Capacity of errors[]
- * @param new_error - The candidate error to add
- * @param error_modes - Mode bitmask array (parallel to errors[])
- * @param mode_bit - Bit for the current analysis mode
- * @return New total_errors count
  */
 static int merge_analysis_error(DetectedError *errors, int total_errors, int max_errors,
                                  const DetectedError *new_error,
@@ -1849,18 +1705,6 @@ static int merge_analysis_error(DetectedError *errors, int total_errors, int max
 
 /*
  * run_max_analysis - Run ALL analysis modes and aggregate results
- *
- *      (sanitizers, warnings, analyzer, clang-tidy, valgrind, tsan)
- *      and aggregating all unique errors with deduplication.
- *
- * @param sources - Array of paths to source files
- * @param source_count - Number of source files
- * @param errors - Output array for detected errors
- * @param max_errors - Maximum number of errors to collect
- * @param result - TestResult to populate with execution info
- * @param timeout_sec - Maximum execution time in seconds
- * @param colors - Color codes for output
- * @return Number of unique errors found
  */
 int run_max_analysis(const char **sources, int source_count,
                      DetectedError *errors, int max_errors,
@@ -1876,7 +1720,7 @@ int run_max_analysis(const char **sources, int source_count,
     uint64_t error_modes[32] = {0};
     long cumulative_time_ms = 0;
 
-    generate_temp_path("c_tester", binary_path, sizeof(binary_path));
+    generate_temp_path("prism", binary_path, sizeof(binary_path));
     memset(result, 0, sizeof(TestResult));
 
     printf("========================================\n");
@@ -2220,15 +2064,10 @@ int run_max_analysis(const char **sources, int source_count,
 
 /*
  * print_usage - Print comprehensive help message and exit
- *
- *      to use the tool effectively. Grouped options improve readability.
- *
- * @param prog_name - Program name from argv[0]
- * @param colors - Color codes for colored output
  */
 void print_usage(const char *prog_name, const ColorCodes *colors)
 {
-    print_colored(colors, colors->bold, "c_tester v1.4 - C Error Detection Tool\n");
+    print_colored(colors, colors->bold, "prism v1.4 - C Error Detection Tool\n");
     printf("Detects memory errors, undefined behavior, and bugs in C/C++ code.\n\n");
 
     print_colored(colors, colors->bold, "Usage: ");
@@ -2296,14 +2135,6 @@ void print_usage(const char *prog_name, const ColorCodes *colors)
 
 /*
  * parse_compile_commands - Extract compile flags for a source file
- *
- *      Parse it to get the actual compile flags used in the project.
- *
- * @param json_path - Path to compile_commands.json
- * @param source_file - Source file to find flags for
- * @param flags_output - Output: extracted flags string
- * @param flags_size - Size of flags buffer
- * @return 0 on success, -1 on error
  */
 int parse_compile_commands(const char *json_path, const char *source_file,
                           char *flags_output, size_t flags_size)
@@ -2345,16 +2176,6 @@ int parse_compile_commands(const char *json_path, const char *source_file,
 
 /*
  * run_with_compile_flags - Compile using flags from compile_commands.json
- *
- *      instead of guessing. This ensures accurate analysis.
- *
- * @param sources - Array of source files
- * @param source_count - Number of source files
- * @param flags - Flags string from compile_commands.json
- * @param binary - Output binary path
- * @param output - Buffer for compiler output
- * @param output_size - Size of output buffer
- * @return 0 on success, non-zero on failure
  */
 int run_with_compile_flags(const char **sources, int source_count,
                            const char *flags,
@@ -2515,10 +2336,6 @@ int run_fuzz_analysis(const char *binary,
 
 /*
  * run_with_rerun - Run binary multiple times to detect heisenbugs
- *
- *      every execution. Running N times reveals crash probability.
- *
- * @return 1 if heisenbug variant detected, 0 if deterministic
  */
 int run_with_rerun(const char *binary, int rerun_count,
                    DetectedError *errors, int max_errors,
@@ -2971,7 +2788,7 @@ int compute_source_hash(const char *source_file, char *hash_buf,
 /*
  * save_cache_entry - Save compilation result to cache
  *
- *      Cache is stored under ~/.cache/c_tester/<hash>.
+ *      Cache is stored under ~/.cache/prism/<hash>.
  */
 void save_cache_entry(const char *hash, bool success,
                        const char *compiler_output)
@@ -2983,7 +2800,7 @@ void save_cache_entry(const char *hash, bool success,
 
     if (!home || !hash || !compiler_output) return;
 
-    snprintf(cache_dir, sizeof(cache_dir), "%s/.cache/c_tester", home);
+    snprintf(cache_dir, sizeof(cache_dir), "%s/.cache/prism", home);
     snprintf(cache_path, sizeof(cache_path), "%s/%s", cache_dir, hash);
 
     /* Create cache directory */
@@ -3013,7 +2830,7 @@ int load_cache_entry(const char *hash, bool *success,
 
     if (!home || !hash || !success) return -1;
 
-    snprintf(cache_path, sizeof(cache_path), "%s/.cache/c_tester/%s",
+    snprintf(cache_path, sizeof(cache_path), "%s/.cache/prism/%s",
              home, hash);
 
     fp = fopen(cache_path, "r");
@@ -3257,7 +3074,7 @@ int run_libfuzzer_analysis(const char **sources, int source_count,
     }
 
     /* Generate temp binary path */
-    generate_temp_path("c_tester_fuzz", binary_path, sizeof(binary_path));
+    generate_temp_path("prism_fuzz", binary_path, sizeof(binary_path));
 
     /* Compile with libFuzzer + ASan */
     size_t pos = snprintf(cmd, sizeof(cmd),
@@ -3416,7 +3233,7 @@ int run_ultra_analysis(const char **sources, int source_count,
         if (is_cpp != ultra_variants[i].is_cpp_target) continue;
         binary_paths[i] = malloc(MAX_PATH_LEN);
         if (!binary_paths[i]) continue;
-        generate_temp_path("c_tester_ultra", binary_paths[i], MAX_PATH_LEN);
+        generate_temp_path("prism_ultra", binary_paths[i], MAX_PATH_LEN);
         num_to_compile++;
     }
 
@@ -3484,7 +3301,7 @@ int run_ultra_analysis(const char **sources, int source_count,
 
     for (int i = 0; i < MAX_ANALYSIS_PASSES; i++) {
         snprintf(analysis_passes[i].result_file, sizeof(analysis_passes[i].result_file),
-                 "/tmp/c_tester_ultra_ap_%d_%d", (int)getpid(), i);
+                 "/tmp/prism_ultra_ap_%d_%d", (int)getpid(), i);
     }
 
     /* Helper to find a binary path by tag */
@@ -3936,7 +3753,7 @@ int run_ultra_analysis(const char **sources, int source_count,
             DetectedError le[16]; memset(le,0,sizeof(le)); int lc=0; char lo[1];
             if (system("command -v clang >/dev/null 2>&1") == 0) {
                 char msan_bin[MAX_PATH_LEN];
-                generate_temp_path("c_tester_msan",msan_bin,sizeof(msan_bin));
+                generate_temp_path("prism_msan",msan_bin,sizeof(msan_bin));
                 char cmd[16384];
                 size_t pos = snprintf(cmd,sizeof(cmd),
                     "clang -fsanitize=memory -fsanitize-memory-track-origins=2 -g -O1 -o '%s'",msan_bin);
@@ -4213,7 +4030,7 @@ int run_ultra_analysis(const char **sources, int source_count,
 #undef ULTRA_CHILD_RESULT
 
 /*
- * main - CLI entry point for c_tester
+ * main - CLI entry point for prism
  *
  *      execution, and error reporting workflow.
  *      Supports multiple source files compiled into a single binary.
@@ -4398,8 +4215,8 @@ int main(int argc, char *argv[])
 
         fprintf(hook_file,
                 "#!/bin/sh\n"
-                "# c_tester pre-commit hook (auto-installed)\n"
-                "./c_tester --quick --git-diff \"$@\" || exit 1\n");
+                "# prism pre-commit hook (auto-installed)\n"
+                "./prism --quick --git-diff \"$@\" || exit 1\n");
         fclose(hook_file);
         chmod(hook_path, 0755);
 
@@ -4430,7 +4247,7 @@ int main(int argc, char *argv[])
         if (home) {
             char cache_dir[MAX_PATH_LEN];
             char rm_cmd[MAX_PATH_LEN + 64];
-            snprintf(cache_dir, sizeof(cache_dir), "%s/.cache/c_tester", home);
+            snprintf(cache_dir, sizeof(cache_dir), "%s/.cache/prism", home);
             snprintf(rm_cmd, sizeof(rm_cmd), "rm -rf '%s' 2>/dev/null", cache_dir);
             system(rm_cmd);
             print_colored(&colors, colors.green, "[OK] ");
@@ -4451,12 +4268,12 @@ int main(int argc, char *argv[])
 
         /* Create bisect script */
         snprintf(script_path, sizeof(script_path),
-                 "/tmp/c_tester_bisect_%d.sh", (int)getpid());
+                 "/tmp/prism_bisect_%d.sh", (int)getpid());
         FILE *sfp = fopen(script_path, "w");
         if (sfp) {
             fprintf(sfp,
                     "#!/bin/sh\n"
-                    "# c_tester git bisect script\n");
+                    "# prism git bisect script\n");
             /* Compile the source file */
             for (int si = 0; si < source_count; si++)
                 fprintf(sfp, "SRC%d='%s'\n", si, source_files[si]);
@@ -4466,11 +4283,11 @@ int main(int argc, char *argv[])
                 fprintf(sfp, " \"$SRC%d\"", si);
             fprintf(sfp,
                     "\"\n"
-                    "gcc -Wall -Wextra -fsanitize=address,undefined -o /tmp/c_tester_bisect_bin $SRCS 2>/dev/null || exit 125\n"
-                    "timeout 5 /tmp/c_tester_bisect_bin 2>/tmp/c_tester_bisect_err.txt\n"
+                    "gcc -Wall -Wextra -fsanitize=address,undefined -o /tmp/prism_bisect_bin $SRCS 2>/dev/null || exit 125\n"
+                    "timeout 5 /tmp/prism_bisect_bin 2>/tmp/prism_bisect_err.txt\n"
                     "EXIT=$?\n"
                     "if [ \"$EXIT\" -ne 0 ] && [ \"$EXIT\" -ne 125 ]; then\n"
-                    "  if grep -q 'ERROR:\\|runtime error:\\|===.*WARNING' /tmp/c_tester_bisect_err.txt 2>/dev/null; then\n"
+                    "  if grep -q 'ERROR:\\|runtime error:\\|===.*WARNING' /tmp/prism_bisect_err.txt 2>/dev/null; then\n"
                     "    exit 1\n"
                     "  fi\n"
                     "fi\n"
@@ -4600,7 +4417,7 @@ int main(int argc, char *argv[])
 
             pid_t pid = fork();
             if (pid == 0) {
-                /* Child: process ONE file by execing c_tester */
+                /* Child: process ONE file by execing prism */
                 char timeout_str[32];
                 char rerun_str[32];
                 char project_str[MAX_PATH_LEN + 16];
@@ -4611,7 +4428,7 @@ int main(int argc, char *argv[])
                 /* Build argument list for child */
                 int arg_idx = 0;
                 char *child_argv[48];
-                child_argv[arg_idx++] = "./c_tester";
+                child_argv[arg_idx++] = "./prism";
                 if (keep_binary) child_argv[arg_idx++] = "--keep";
                 child_argv[arg_idx++] = timeout_str;
                 if (use_tsan) child_argv[arg_idx++] = "--tsan";
@@ -4649,7 +4466,7 @@ int main(int argc, char *argv[])
                 child_argv[arg_idx++] = (char *)source_files[i];
                 child_argv[arg_idx++] = NULL;
 
-                execvp(self_binary ? self_binary : "./c_tester", child_argv);
+                execvp(self_binary ? self_binary : "./prism", child_argv);
                 _exit(127);
             } else if (pid > 0) {
                 active_children++;
@@ -4715,7 +4532,7 @@ int main(int argc, char *argv[])
     /* --gcov: standalone code coverage analysis */
     if (use_gcov) {
         char gcov_bin[MAX_PATH_LEN];
-        generate_temp_path("c_tester_gcov", gcov_bin, sizeof(gcov_bin));
+        generate_temp_path("prism_gcov", gcov_bin, sizeof(gcov_bin));
 
         /* Compile with coverage flags */
         char compile_cmd[MAX_PATH_LEN * 8 + 128];
@@ -4868,7 +4685,7 @@ int main(int argc, char *argv[])
         return EXIT_CLEAN;
     }
 
-    generate_temp_path("c_tester", binary_path, sizeof(binary_path));
+    generate_temp_path("prism", binary_path, sizeof(binary_path));
 
     /* Use compile_commands.json if specified */
     if (project_json[0]) {
@@ -4894,7 +4711,7 @@ int main(int argc, char *argv[])
     /* --quick: fast feedback with basic flags only */
     if (use_quick && !result.compilation_success) {
         char quick_bin[MAX_PATH_LEN];
-        generate_temp_path("c_tester_quick", quick_bin, sizeof(quick_bin));
+        generate_temp_path("prism_quick", quick_bin, sizeof(quick_bin));
 
         int comp_ret = compile_with_basic_flags(source_files, source_count,
                          quick_bin,
@@ -5286,7 +5103,7 @@ int main(int argc, char *argv[])
             strncpy(baseline_file, baseline_path, sizeof(baseline_file) - 1);
         else
             snprintf(baseline_file, sizeof(baseline_file),
-                     "c_tester-baseline.json");
+                     "prism-baseline.json");
         baseline_file[sizeof(baseline_file) - 1] = '\0';
 
         if (save_baseline(baseline_file, errors, error_count) == 0) {

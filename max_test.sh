@@ -6,7 +6,7 @@
 if [ -z "$1" ]; then
     echo "Usage: $0 <source.c>"
     echo ""
-    echo "Tests ONE file with ALL c_tester flags:"
+    echo "Tests ONE file with ALL prism flags:"
     echo "  - Default (ASan + UBSan)"
     echo "  - --analyzer (GCC static)"
     echo "  - --valgrind (deep memory)"
@@ -19,7 +19,7 @@ if [ -z "$1" ]; then
 fi
 
 FILE=$1
-C_TESTER="./c_tester"
+C_TESTER="./prism"
 
 if [ ! -f "$FILE" ]; then
     echo "Error: File not found: $FILE"
@@ -27,7 +27,7 @@ if [ ! -f "$FILE" ]; then
 fi
 
 echo "========================================"
-echo "  c_tester - MAX POWER TEST"
+echo "  prism - MAX POWER TEST"
 echo "========================================"
 echo ""
 echo "Testing: $FILE"

@@ -1,10 +1,6 @@
 /*
- * annotation.c - Function annotation system implementation
- *
- * Purpose: Contains the built-in annotation database (~50 libc functions)
- *          and the lookup API consumed by check modules in Phase 3.
- *          The annotation array is sorted lexicographically and searched
- *          via binary search for O(log n) lookup.
+ * annotation.c - Built-in function annotation database (~50 libc funcs)
+ * and the binary-search lookup API used by check modules.
  */
 
 #include "annotation.h"
@@ -12,9 +8,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-/* ---- Built-in annotation array ---- */
-/* Sorted alphabetically for binary search. */
-/* Initialized with a function to avoid macro comma issues with {} initializers. */
+/* Built-in annotation array, alphabetically sorted for binary search */
 
 static void init_builtin(Annotation *ann, int *count_out)
 {
@@ -394,7 +388,7 @@ static void init_builtin(Annotation *ann, int *count_out)
 
 #define BUILTIN_MAX 64
 
-/* ---- Annotation Database ---- */
+/* Annotation DB structure */
 
 struct AnnotationDB {
     Annotation builtin[BUILTIN_MAX];
@@ -403,7 +397,7 @@ struct AnnotationDB {
     int user_count;
 };
 
-/* ---- Binary search ---- */
+/* Binary search */
 static const Annotation *find_annotation(const Annotation *array,
                                           int count, const char *name)
 {
@@ -425,7 +419,7 @@ static int annot_cmp(const void *a, const void *b)
     return strcmp(pa->func_name, pb->func_name);
 }
 
-/* ---- Public API ---- */
+/* Public API */
 
 AnnotationDB *ann_load(const char *path)
 {
@@ -435,7 +429,7 @@ AnnotationDB *ann_load(const char *path)
     init_builtin(db->builtin, &db->builtin_count);
     qsort(db->builtin, db->builtin_count, sizeof(Annotation), annot_cmp);
 
-    /* Load user annotations from JSON if path provided */
+    /* Try loading user annotations from a JSON file */
     if (path) {
         FILE *fp = fopen(path, "r");
         if (!fp) {

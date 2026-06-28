@@ -1,14 +1,9 @@
 /*
- * sym_exec.c - Lightweight symbolic execution engine implementation
+ * sym_exec.c - Lightweight symbolic execution engine
  *
- * Design: Scans source lines for if/while/for conditions and builds a
- *         path-sensitive constraint graph. Each branch forks the state
- *         set; each fork carries refined integer ranges on named variables.
- *
- * Limits:  512 paths per function, 10 basic blocks deep.
- *
- * Integration: Called from check_engine to answer queries about variable
- *              ranges on feasible paths, reducing false positives.
+ * Scans source lines for if/while/for conditions, forks state at each
+ * branch, tracks integer ranges. 512 paths max, 10 blocks deep.
+ * check_engine calls in to ask about variable ranges on feasible paths.
  */
 
 #include "sym_exec.h"
@@ -18,12 +13,9 @@
 #include <ctype.h>
 #include <limits.h>
 
-/* ---- Helpers: parsing conditions from source lines ---- */
+/* Helpers: pulling conditions out of source lines */
 
-/*
- * Extract a simple variable name from the start of a C expression.
- * Stops at operators, whitespace, or end of string.
- */
+/* Grab a variable name from the start of a C expression */
 static int extract_var_name(const char *src, char *out, int out_size)
 {
     int i = 0;
@@ -38,10 +30,7 @@ static int extract_var_name(const char *src, char *out, int out_size)
     return i;
 }
 
-/*
- * Parse a comparison like "i < 10" or "x >= 0" from a string.
- * Returns false if no comparison found.
- */
+/* Parse "i < 10" or "x >= 0" from a condition string */
 static bool parse_comparison(const char *cond_text,
                               char *var_out, int var_size,
                               SymCmpOp *op_out, int *val_out)
@@ -49,7 +38,7 @@ static bool parse_comparison(const char *cond_text,
     if (!cond_text || !*cond_text)
         return false;
 
-    /* Skip opening paren if present */
+    /* Skip leading paren if any */
     while (*cond_text == '(' || *cond_text == ' ')
         cond_text++;
 
@@ -61,10 +50,7 @@ static bool parse_comparison(const char *cond_text,
     /* Advance past variable name in the source */
     cond_text += strlen(vname);
 
-    /* Skip whitespace */
-    while (*cond_text == ' ') cond_text++;
-
-    /* Try comparison operators */
+    /* Eat whitespace then look for comparison op */
     SymCmpOp op;
     if (strncmp(cond_text, "<=", 2) == 0) {
         op = SYM_CMP_LE;
@@ -85,7 +71,7 @@ static bool parse_comparison(const char *cond_text,
         op = SYM_CMP_GT;
         cond_text++;
     } else if (*cond_text == '=') {
-        /* Assignment, not comparison */
+        /* '=' is assignment, not comparison — skip */
         return false;
     } else {
         return false;
@@ -94,7 +80,7 @@ static bool parse_comparison(const char *cond_text,
     /* Skip whitespace after operator */
     while (*cond_text == ' ') cond_text++;
 
-    /* Check if the value part is a number */
+    /* Is the right side a number? */
     if (*cond_text == '-' || isdigit((unsigned char)*cond_text)) {
         char *end = NULL;
         long v = strtol(cond_text, &end, 10);
@@ -110,10 +96,7 @@ static bool parse_comparison(const char *cond_text,
     return false;
 }
 
-/*
- * Find a branch condition line in source text.
- * Looks for "if (", "while (", or "for (...; condition; ...)" patterns.
- */
+/* Branch point: an if/while/for with a parsed condition */
 typedef struct {
     int line_number;
     char condition[256];
@@ -121,15 +104,12 @@ typedef struct {
     int false_target;  /* line number of first line after the block (false) */
 } BranchPoint;
 
-/* Max branch points we track */
+/* Cap on branch points we track */
 #define MAX_BRANCHES 64
 
-/* ---- SymState operations ---- */
+/* SymState operations */
 
-/*
- * Create a new empty state (no constraints).
- * Returns NULL on allocation failure.
- */
+/* Allocate a new empty state; NULL on failure */
 static SymState *sym_state_new(void)
 {
     SymState *s = (SymState *)calloc(1, sizeof(SymState));
@@ -141,30 +121,25 @@ static SymState *sym_state_new(void)
     return s;
 }
 
-/*
- * Deep-copy a SymState (including all vars and constraints).
- */
+/* Deep-copy a SymState */
 static SymState *sym_state_clone(const SymState *src)
 {
     if (!src) return NULL;
     SymState *s = sym_state_new();
     if (!s) return NULL;
-    *s = *src;   /* shallow copy all fields */
-    s->next = NULL;  /* don't copy linked list */
-    /* All vars are value types (char arrays + ints), shallow copy is correct */
+    *s = *src;       /* shallow-copy fields, don't link into the list */
+    s->next = NULL;  /* SymVarRange entries are value types — clean copy */
     return s;
 }
 
-/*
- * Find or create a variable range entry in a state.
- */
+/* Find or create a variable range entry */
 static SymVarRange *sym_get_var(SymState *s, const char *name)
 {
     for (int i = 0; i < s->var_count; i++) {
         if (strcmp(s->vars[i].var_name, name) == 0)
             return &s->vars[i];
     }
-    /* Not found — add it */
+    /* Not found yet — create it */
     if (s->var_count >= 64) return NULL;
     SymVarRange *vr = &s->vars[s->var_count++];
     memset(vr, 0, sizeof(SymVarRange));
@@ -177,16 +152,13 @@ static SymVarRange *sym_get_var(SymState *s, const char *name)
     return vr;
 }
 
-/*
- * Apply a constraint to a state, narrowing the variable's range.
- * Returns true if the state is still feasible (range non-empty).
- */
+/* Narrow a variable's range with a constraint; false if infeasible */
 static bool sym_apply_constraint(SymState *s,
                                   const char *var,
                                   SymCmpOp op, int val)
 {
     SymVarRange *vr = sym_get_var(s, var);
-    if (!vr) return false;   /* out of var slots — assume feasible */
+    if (!vr) return false;   /* out of slots — conservatively assume feasible */
 
     switch (op) {
     case SYM_CMP_LT: if (val - 1 < vr->max_val) vr->max_val = val - 1; break;
@@ -202,10 +174,10 @@ static bool sym_apply_constraint(SymState *s,
         break;
     }
 
-    /* Check infeasibility */
+    /* Infeasible if min > max */
     if (vr->min_val > vr->max_val) return false;
 
-    /* Pointer-specific handling */
+    /* Pointer-specific tracking (NULL / non-NULL) */
     if (op == SYM_CMP_EQ) {
         if (val == 0) {
             vr->is_null = true;
@@ -222,13 +194,7 @@ static bool sym_apply_constraint(SymState *s,
     return true;
 }
 
-/* ---- Branch detection from source lines ---- */
-
-/*
- * Detect branch conditions in source lines.
- * Populates branches[] array with found if/while conditions.
- * Returns number of branches found.
- */
+/* Branch detection — scans source lines for if/while/for */
 static int find_branches(const char *source_path,
                           BranchPoint *branches, int max_branches)
 {
@@ -243,7 +209,7 @@ static int find_branches(const char *source_path,
         lnum++;
         if (nb >= max_branches) break;
 
-        /* Find if/while/for conditions */
+        /* Look for if ( / while ( / for ( */
         const char *cond_start = NULL;
         bool is_for = false;
 
@@ -261,7 +227,7 @@ static int find_branches(const char *source_path,
 
         if (!cond_start) continue;
 
-        /* Extract the condition text (between parens) */
+        /* Pull out the text between the outer parens */
         char cond_text[256] = {0};
         int depth = 0;
         int ci = 0;
@@ -274,14 +240,14 @@ static int find_branches(const char *source_path,
                 depth--;
             }
 
-            /* For for-loops, we want the middle condition (index < limit) */
+            /* For for-loops, grab the middle expression (the actual condition) */
             if (is_for) {
-                /* Skip the init part (up to first semicolon) */
+                /* Skip the init expression — stop at first semicolon */
                 if (ci == 0 && *p == ';') {
                     cond_text[0] = '\0';
                     ci = 0;
                     p++;
-                    /* Now reading the condition part */
+                    /* Now reading the condition */
                     while (*p && *p != ';') {
                         if (ci < (int)sizeof(cond_text) - 1)
                             cond_text[ci++] = *p;
@@ -290,7 +256,7 @@ static int find_branches(const char *source_path,
                     cond_text[ci] = '\0';
                     break;
                 }
-                /* We haven't seen init's semicolon yet */
+                /* Still in the init part — keep skipping */
                 p++;
                 continue;
             }
@@ -316,15 +282,7 @@ static int find_branches(const char *source_path,
     return nb;
 }
 
-/* ---- Path set operations ---- */
-
-/*
- * Fork all paths in a set for a given branch condition.
- * For each existing path, creates two children:
- *   - True fork: constraint that cond holds
- *   - False fork: constraint that cond is negated
- * Prunes infeasible paths.
- */
+/* Path set: fork every path at a branch, prune infeasible ones */
 static void sym_fork_at_branch(SymPathSet *ps,
                                  const char *var,
                                  SymCmpOp op, int val)
@@ -337,12 +295,12 @@ static void sym_fork_at_branch(SymPathSet *ps,
         original->next = NULL;
         ps->path_count--;
 
-        /* Fork path for true branch */
+        /* Fork: true branch — condition holds */
         SymState *true_state = sym_state_clone(original);
         if (true_state) {
             true_state->depth = original->depth + 1;
             if (sym_apply_constraint(true_state, var, op, val)) {
-                /* Append to end of path list */
+                /* Append to the path list */
                 SymState **p = &ps->paths;
                 while (*p) p = &(*p)->next;
                 *p = true_state;
@@ -352,7 +310,7 @@ static void sym_fork_at_branch(SymPathSet *ps,
             }
         }
 
-        /* Fork path for false branch (negated condition) */
+        /* Fork: false branch — negated condition */
         SymState *false_state = sym_state_clone(original);
         if (false_state) {
             false_state->depth = original->depth + 1;
@@ -381,7 +339,7 @@ static void sym_fork_at_branch(SymPathSet *ps,
     }
 }
 
-/* ---- Public API ---- */
+/* Public API */
 
 SymPathSet sym_analyze_source(const char *source_path,
                                const char *func_name,
@@ -397,27 +355,27 @@ SymPathSet sym_analyze_source(const char *source_path,
 
     if (!source_path) return result;
 
-    /* Detect branch conditions in the source */
+    /* Find all branch conditions in the source */
     BranchPoint branches[MAX_BRANCHES];
     int nb = find_branches(source_path, branches, MAX_BRANCHES);
 
     if (nb == 0) {
-        /* No branches — single path, no constraints */
+        /* No branches: single path, empty constraints */
         result.paths = sym_state_new();
         result.path_count = 1;
         return result;
     }
 
-    /* Start with a single empty path */
+    /* Bootstrap with one empty path */
     result.paths = sym_state_new();
     result.path_count = 1;
 
-    /* Process each branch, forking paths */
+    /* Fork at each branch */
     for (int b = 0; b < nb; b++) {
         if (result.path_count >= result.max_paths) break;
         if (result.paths == NULL) break;
 
-        /* Parse the condition from this branch */
+        /* Parse and apply the condition */
         char var[64];
         SymCmpOp op;
         int val;
@@ -426,8 +384,7 @@ SymPathSet sym_analyze_source(const char *source_path,
                               var, sizeof(var), &op, &val)) {
             sym_fork_at_branch(&result, var, op, val);
         }
-        /* If we can't parse the condition, we keep all existing paths
-         * as-is (conservative: don't prune). */
+        /* Can't parse? Keep all paths — conservative: don't prune */
     }
 
     return result;
@@ -449,7 +406,7 @@ void sym_free_paths(SymPathSet *ps)
 bool sym_can_be_negative(const SymPathSet *ps, const char *var_name)
 {
     if (!ps || !var_name || !ps->paths)
-        return true;   /* conservative: assume it can be */
+        return true;   /* can't check? assume yes */
 
     SymState *s = ps->paths;
     while (s) {
@@ -463,13 +420,13 @@ bool sym_can_be_negative(const SymPathSet *ps, const char *var_name)
         s = s->next;
     }
 
-    return false;   /* no path allows negative */
+    return false;   /* no path lets this go negative */
 }
 
 bool sym_can_exceed(const SymPathSet *ps, const char *var_name, int bound)
 {
     if (!ps || !var_name || !ps->paths)
-        return true;   /* conservative */
+        return true;   /* assume yes if we can't check */
 
     SymState *s = ps->paths;
     while (s) {
@@ -489,7 +446,7 @@ bool sym_can_exceed(const SymPathSet *ps, const char *var_name, int bound)
 bool sym_is_always_nonnull(const SymPathSet *ps, const char *var_name)
 {
     if (!ps || !var_name || !ps->paths)
-        return false;   /* conservative */
+        return false;   /* assume no if we can't check */
 
     SymState *s = ps->paths;
     while (s) {
@@ -503,7 +460,7 @@ bool sym_is_always_nonnull(const SymPathSet *ps, const char *var_name)
         s = s->next;
     }
 
-    /* All paths agree the pointer is non-NULL */
+    /* Every feasible path says this ptr is non-NULL */
     return true;
 }
 

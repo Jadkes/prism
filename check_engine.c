@@ -1,19 +1,16 @@
 /*
- * check_engine.c - Implementation of 8 static analysis check modules
+ * check_engine.c - 8 static analysis passes over AST call-site data
  *
- * Design: Uses the AST call-site data (from ast_backend) and function
- *         contracts (from annotation system) to detect flow-aware bugs.
- *         Each check module is a focused function operating on collected
- *         call data, sorted by line number within each function.
+ * Each pass looks for a specific flavor of footgun, fed by the AST backend's
+ * call-site list and the annotation system's function contracts.
  *
- * The 8 modules:
- *   1. null_deref_check     — ptr=NULL then ptr->field without NULL check
- *   2. use_after_free_check — free(ptr) then ptr->field
- *   3. buffer_size_check    — strcpy/sprintf to fixed-size buffer
+ *   1. null_deref_check     — ptr=NULL then ->field without a NULL check
+ *   2. use_after_free_check — free(ptr) then ->field
+ *   3. buffer_size_check    — strcpy/sprintf to a fixed-size buffer
  *   4. resource_leak_check  — fopen/open/socket without fclose/close
- *   5. double_free_check    — free(ptr) called twice
- *   6. format_string_check  — printf(user_var) without format string
- *   7. overflow_check       — atoi(user_input) as index without bounds
+ *   5. double_free_check    — free(ptr) twice
+ *   6. format_string_check  — printf(user_var) with no format string
+ *   7. overflow_check       — unchecked atoi() used as array index
  *   8. null_check_order     — ptr->field before if(!ptr)
  */
 
@@ -22,7 +19,7 @@
 #include <stdio.h>
 #include <ctype.h>
 
-/* ---- Internal: call-site sorting by line within each function ---- */
+/* Call-site sorting by line */
 
 static int sort_by_line(const void *a, const void *b)
 {
@@ -33,7 +30,7 @@ static int sort_by_line(const void *a, const void *b)
     return 0;
 }
 
-/* ---- Safe source-file copy helper (avoids strncpy truncation warnings) ---- */
+/* Safe source-file copy (snprintf avoids -Wstringop-truncation) */
 
 static void copy_source_file(char *dst, size_t dst_sz,
                               const char *src)
@@ -41,8 +38,7 @@ static void copy_source_file(char *dst, size_t dst_sz,
     snprintf(dst, dst_sz, "%.*s", (int)(dst_sz - 1), src);
 }
 
-/* ---- Module 1: Null-deref path check ---- */
-/* Checks for: ptr = NULL; ... *ptr = x; (without NULL check in between) */
+/* Module 1: checking if u forgot to null check before *ptr = x */
 
 static int check_null_deref_in_func(
     const CallSite *calls, int n_calls,
@@ -55,7 +51,7 @@ static int check_null_deref_in_func(
         if (!a || !a->can_return_null)
             continue;
 
-        /* Flag all unchecked nullable returns */
+        /* flagged — unchecked nullable return */
         DetectedError *de = &errors[found];
         memset(de, 0, sizeof(DetectedError));
         de->type = ERR_NULL_DEREF;
@@ -76,8 +72,7 @@ static int check_null_deref_in_func(
     return found;
 }
 
-/* ---- Module 2: Use-after-free check ---- */
-/* Track free(ptr) then later ptr->field or func(ptr) calls */
+/* Module 2: did u free(ptr) and then touch it again */
 
 static int check_uaf_in_func(
     const CallSite *calls, int n_calls,
@@ -86,22 +81,20 @@ static int check_uaf_in_func(
 {
     int found = 0;
 
-    /* Find all free() calls */
+    /* Look for use-after-free: callee after free() */
     for (int i = 0; i < n_calls; i++) {
         if (strcmp(calls[i].callee, "free") != 0)
             continue;
 
-        /* Look for any non-free use of a pointer after free() */
+        /* Any non-free use of the pointer after the free */
         for (int j = i + 1; j < n_calls; j++) {
             const Annotation *aj = ann_lookup(ann, calls[j].callee);
             if (!aj) continue;
 
-            /* Skip free / realloc */
+            /* Skip free/realloc and allocators */
             if (strcmp(calls[j].callee, "free") == 0 ||
                 strcmp(calls[j].callee, "realloc") == 0)
                 continue;
-
-            /* Skip allocators */
             if (aj->returns_alloc) continue;
 
             /* Skip calls on the same or adjacent line */
@@ -133,8 +126,7 @@ static int check_uaf_in_func(
     return found;
 }
 
-/* ---- Module 3: Buffer-size check ---- */
-/* Flag strcpy/sprintf/strcat without _n variants or snprintf */
+/* Module 3: barking at unbounded strcpy/sprintf/strcat */
 
 static int check_buffer_size(
     const CallSite *calls, int n_calls,
@@ -174,8 +166,7 @@ static int check_buffer_size(
     return found;
 }
 
-/* ---- Module 4: Resource leak check ---- */
-/* Track fopen/open/socket calls matched with fclose/close */
+/* Module 4: fopen'd it, forgot to fclose */
 
 static int check_resource_leak(
     const CallSite *calls, int n_calls,
@@ -200,7 +191,7 @@ static int check_resource_leak(
         if (!a) continue;
 
         if (a->paired_close) {
-            /* Resource-opening call (fopen, open, socket, ...) */
+            /* Opening resource: fopen, open, socket, ... */
             if (res_count < MAX_RES) {
                 resources[res_count].open_func = calls[i].callee;
                 resources[res_count].close_func = a->paired_close;
@@ -209,7 +200,7 @@ static int check_resource_leak(
                 res_count++;
             }
         } else if (a->paired_open) {
-            /* Resource-closing call (fclose, close, ...) */
+            /* Closing resource match */
             for (int r = 0; r < res_count; r++) {
                 if (resources[r].is_open &&
                     strcmp(resources[r].close_func,
@@ -221,7 +212,7 @@ static int check_resource_leak(
         }
     }
 
-    /* Report unclosed resources */
+    /* Spill: anything still open now is a leak */
     for (int r = 0; r < res_count && found < max; r++) {
         if (!resources[r].is_open) continue;
 
@@ -231,7 +222,7 @@ static int check_resource_leak(
         de->severity = 2;
         de->has_source = true;
 
-        /* Find source file from calls array */
+        /* Fish the source file from the calls array */
         for (int i = 0; i < n_calls; i++) {
             if (strcmp(calls[i].callee, resources[r].open_func) == 0 &&
                 calls[i].line == resources[r].open_line) {
@@ -255,8 +246,7 @@ static int check_resource_leak(
     return found;
 }
 
-/* ---- Module 5: Double-free / double-close check ---- */
-/* Detect free(ptr) or close(fd) called twice */
+/* Module 5: free'd it twice (ouch) */
 
 static int check_double_free(
     const CallSite *calls, int n_calls,
@@ -270,14 +260,14 @@ static int check_double_free(
             strcmp(calls[i].callee, "fclose") != 0)
             continue;
 
-        /* Look for another call to the same function nearby */
+        /* Another call to the same function downstream? */
         for (int j = i + 1; j < n_calls && found < max; j++) {
             if (strcmp(calls[j].callee, calls[i].callee) != 0)
                 continue;
             if (calls[j].line <= calls[i].line + 1)
                 continue;
 
-            /* Found double call */
+            /* Found a double call */
             DetectedError *de = &errors[found];
             memset(de, 0, sizeof(DetectedError));
             de->type = ERR_DOUBLE_FREE_CPP;
@@ -303,8 +293,7 @@ static int check_double_free(
     return found;
 }
 
-/* ---- Module 6: Format string check ---- */
-/* Detect printf(user_controlled) without format string */
+/* Module 6: naughty — printf(var) instead of printf("%s", var) */
 
 static int check_format_string(
     const CallSite *calls, int n_calls,
@@ -317,7 +306,7 @@ static int check_format_string(
         const Annotation *a = ann_lookup(ann, calls[i].callee);
         if (!a) continue;
 
-        /* Check if the function has a format string parameter */
+        /* Does this function take a format string? */
         int fmt_param = -1;
         for (int p = 0; p < a->param_count; p++) {
             if (a->params[p].role == ROLE_FMT_STR) {
@@ -327,7 +316,7 @@ static int check_format_string(
         }
         if (fmt_param < 0) continue;
 
-        /* Read the source line and check if fmt arg is a literal */
+        /* Sniff the source to see if the format argument is a literal */
         FILE *fp = fopen(source_path, "r");
         if (!fp) continue;
 
@@ -344,26 +333,24 @@ static int check_format_string(
             if (!paren) { is_literal = true; break; }
             paren++;
 
-            /* Skip whitespace */
+            /* Eat whitespace before the first arg */
             while (*paren == ' ' || *paren == '\t') paren++;
 
-            /* If the first argument starts with ", it's a literal */
+            /* Starts with " or is a constant — safe */
             if (*paren == '"') { is_literal = true; break; }
 
-            /* If the first arg is a constant expression */
             if (strncmp(paren, "NULL", 4) == 0 ||
                 strncmp(paren, "0", 1) == 0)
             { is_literal = true; break; }
 
-            /* Format string is a variable — potential vulnerability */
+            /* Variable format string — potential vuln */
             is_literal = false;
             break;
         }
         fclose(fp);
 
-        if (is_literal || !found_line) continue;  /* No issue */
+        if (is_literal || !found_line) continue;  /* no vuln */
 
-        /* Report the format string vulnerability */
         DetectedError *de = &errors[found];
         memset(de, 0, sizeof(DetectedError));
         de->type = ERR_BUFFER_OVERFLOW;
@@ -379,15 +366,12 @@ static int check_format_string(
                  "Use printf(\"%%s\", var) instead of printf(var).",
                  calls[i].callee, calls[i].source_file, calls[i].line);
         found++;
-
-        /* Report the format string vulnerability */
     }
 
     return found;
 }
 
-/* ---- Module 7: Integer overflow check ---- */
-/* Detect atoi/atol result used without bounds checking */
+/* Module 7: atoi/atol result used as array index with no bounds check */
 
 static int check_integer_overflow(
     const CallSite *calls, int n_calls,
@@ -421,8 +405,7 @@ static int check_integer_overflow(
     return found;
 }
 
-/* ---- Module 8: Null-check ordering check ---- */
-/* Detect ptr->field before if (!ptr) in the same function */
+/* Module 8: dereffed the ptr, THEN checked if it's NULL — lol */
 
 static int check_null_order(
     const CallSite *calls, int n_calls,
@@ -449,7 +432,7 @@ static int check_null_order(
             if (lnum < (int)calls[i].line + 1) continue;
             if (lnum > (int)calls[i].line + 5) break;
 
-            /* Look for "->" access or "*" dereference on this line */
+            /* Sniff for -> or * dereference in the next few lines */
             if (strstr(line, "->") || strchr(line, '*')) {
                 DetectedError *de = &errors[found];
                 memset(de, 0, sizeof(DetectedError));
@@ -478,7 +461,7 @@ static int check_null_order(
     return found;
 }
 
-/* ---- Main entry point ---- */
+/* Main entry: run all 8 modules */
 
 int check_engine_run(ASTContext *ast, AnnotationDB *ann,
                      DetectedError *errors, int max_errors)
@@ -488,7 +471,7 @@ int check_engine_run(ASTContext *ast, AnnotationDB *ann,
 
     int total_errors = 0;
 
-    /* Get function list for source file path */
+    /* Get function list to fish out the source file path */
     int n_funcs = ast_get_function_count(ast);
     FunctionInfo *funcs = NULL;
     if (n_funcs > 0) {
@@ -518,11 +501,11 @@ int check_engine_run(ASTContext *ast, AnnotationDB *ann,
             all_calls[n_all_calls++] = buf[c];
     }
 
-    /* Sort calls by line for ordering checks */
+    /* Sort by line — ordering checks depend on this */
     if (n_all_calls > 1)
         qsort(all_calls, n_all_calls, sizeof(CallSite), sort_by_line);
 
-    /* Determine source file path for line-level analysis */
+    /* Need the source path for line-level analysis */
     const char *source_path = NULL;
     if (funcs && n_funcs > 0)
         source_path = funcs[0].source_file;
@@ -530,36 +513,29 @@ int check_engine_run(ASTContext *ast, AnnotationDB *ann,
         source_path = all_calls[0].source_file;
 
     /*
-     * Run each check module. Order matters for modules that need
-     * stale pointers (funcs, source_path) — check them before free.
+     * Order matters here: modules that need funcs/source_path
+     * run before funcs gets freed at the bottom.
      */
 
-    /* Module 4: Resource leak */
+    /* Can run these without annotations or source_path */
     {
         DetectedError bufs[16];
-        int cnt = check_resource_leak(all_calls, n_all_calls, ann,
-                                       bufs, 16);
+        int cnt = check_resource_leak(all_calls, n_all_calls, ann, bufs, 16);
         for (int i = 0; i < cnt && total_errors < max_errors; i++)
             errors[total_errors++] = bufs[i];
     }
-
-    /* Module 5: Double-free */
     {
         DetectedError bufs[16];
         int cnt = check_double_free(all_calls, n_all_calls, bufs, 16);
         for (int i = 0; i < cnt && total_errors < max_errors; i++)
             errors[total_errors++] = bufs[i];
     }
-
-    /* Module 3: Buffer-size */
     {
         DetectedError bufs[16];
         int cnt = check_buffer_size(all_calls, n_all_calls, bufs, 16);
         for (int i = 0; i < cnt && total_errors < max_errors; i++)
             errors[total_errors++] = bufs[i];
     }
-
-    /* Module 7: Integer overflow */
     {
         DetectedError bufs[8];
         int cnt = check_integer_overflow(all_calls, n_all_calls, bufs, 8);
@@ -567,7 +543,7 @@ int check_engine_run(ASTContext *ast, AnnotationDB *ann,
             errors[total_errors++] = bufs[i];
     }
 
-    /* Module 1: Null-deref path (needs annotation DB) */
+    /* Need the annotation DB */
     if (ann) {
         DetectedError bufs[16];
         int cnt = check_null_deref_in_func(all_calls, n_all_calls,
@@ -576,7 +552,7 @@ int check_engine_run(ASTContext *ast, AnnotationDB *ann,
             errors[total_errors++] = bufs[i];
     }
 
-    /* Module 8: Null-check ordering (needs source file) */
+    /* Need the source file path */
     if (source_path) {
         DetectedError bufs[16];
         int cnt = check_null_order(all_calls, n_all_calls,
@@ -585,7 +561,7 @@ int check_engine_run(ASTContext *ast, AnnotationDB *ann,
             errors[total_errors++] = bufs[i];
     }
 
-    /* Module 2: Use-after-free (needs annotation DB) */
+    /* Need annotation DB for pairing checks */
     if (ann) {
         DetectedError bufs[16];
         int cnt = check_uaf_in_func(all_calls, n_all_calls,
@@ -594,7 +570,7 @@ int check_engine_run(ASTContext *ast, AnnotationDB *ann,
             errors[total_errors++] = bufs[i];
     }
 
-    /* Module 6: Format string (needs source file + annotation DB) */
+    /* Need both source file and annotations */
     if (source_path && ann) {
         DetectedError bufs[8];
         int cnt = check_format_string(all_calls, n_all_calls,

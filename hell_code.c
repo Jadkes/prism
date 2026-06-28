@@ -1,6 +1,6 @@
 /*
  * hell_code.c - A file full of every bug imaginable
- * Purpose: Test c_tester's error detection capabilities
+ * Tests prism's error detection capabilities
  */
 
 #include <stdio.h>

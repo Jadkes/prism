@@ -1,25 +1,18 @@
 /*
- * annotation.h - Function annotation system for c_tester
+ * annotation.h - Function annotation system for prism
  *
- * Purpose: Provides function contract information for static analysis.
- *          Each annotation describes a function's parameters (buffer, size,
- *          pointer, fd, format string roles), pairing relationships
- *          (alloc↔free, open↔close), and return value semantics.
- *
- * Design: Built-in annotations for ~50 common libc functions compiled
- *         in. Optional JSON file loading for project-specific functions.
- *         Phase 2 foundation; consumed by check modules in Phase 3.
- *
- * Thread-safety: Single-threaded. DB is loaded once and read-only after.
+ * Describes ~50 libc function contracts: param roles (buffer, size, ptr, fd,
+ * format-str), alloc/free and open/close pairings, and return-value semantics.
+ * Built-in DB compiled in; optional JSON overrides from a file.
  */
 
 #ifndef ANNOTATION_H
 #define ANNOTATION_H
 
-#include "c_tester.h"
+#include "prism.h"
 #include <stdbool.h>
 
-/* ---- Parameter and function role enums ---- */
+/* Parameter and function roles */
 
 typedef enum {
     ROLE_BUFFER,        /* Destination buffer (written to) */
@@ -39,7 +32,7 @@ typedef struct {
     ParamRole role;
 } ParamInfo;
 
-/* ---- Annotation for a single function ---- */
+/* Annotation for one function */
 typedef struct {
     const char *func_name;
 
@@ -61,27 +54,13 @@ typedef struct {
     bool can_return_null;/* Returns NULL on failure (alloc, getenv, fopen) */
 } Annotation;
 
-/* ---- Annotation Database ---- */
+/* Annotation Database (opaque) */
 typedef struct AnnotationDB AnnotationDB;
 
-/*
- * ann_load - Load annotations
- *
- * If path is NULL, loads only the built-in annotations (~50 libc funcs).
- * If path is non-NULL, loads built-in + JSON overrides from file.
- *
- * @param path - Optional path to JSON annotations file (NULL for built-in)
- * @return AnnotationDB, or NULL on failure. Must be ann_free()'d.
- */
+/* Load annotations: built-in if path is NULL, + JSON overrides if given */
 AnnotationDB *ann_load(const char *path);
 
-/*
- * ann_lookup - Get annotation for a function
- *
- * @param db - Annotation database
- * @param func_name - Exact function name
- * @return Pointer to annotation, or NULL if not found
- */
+/* Look up a function's annotation; NULL if not found */
 const Annotation *ann_lookup(AnnotationDB *db, const char *func_name);
 
 /*
@@ -89,12 +68,7 @@ const Annotation *ann_lookup(AnnotationDB *db, const char *func_name);
  */
 void ann_free(AnnotationDB *db);
 
-/*
- * ann_is_paired - Check if two functions are a resource pair
- *
- * Returns true if a and b form an alloc/free or open/close pair
- * (in either direction).
- */
+/* True if a and b are an alloc/free or open/close pair (either direction) */
 bool ann_is_paired(const Annotation *a, const Annotation *b);
 
 #endif /* ANNOTATION_H */

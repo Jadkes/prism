@@ -1,3 +1,35 @@
-c_tester
+# Build
+prism
 *.o
+*.obj
+*.exe
+
+# CMake output
+build/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+CMakeUserPresets.json
+
+# Core dumps
 vgcore.*
+core.*
+
+# IDE / editor
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+*.kate-swp
+
+# Claude Code session files
+.claude/
+
+# AI assistant rules (not for human consumption)
+CLAUDE.md
+
+# OS
+.DS_Store
+Thumbs.db
