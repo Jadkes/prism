@@ -784,6 +784,12 @@ bool file_exists(const char *path)
     return stat(path, &st) == 0;
 }
 
+bool is_directory(const char *path)
+{
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
 /* Check if path has a .c extension */
 bool is_c_file(const char *path)
 {
@@ -2283,7 +2289,9 @@ void print_usage(const char *prog_name, const ColorCodes *colors)
     printf("  --checksec     Check binary for security hardening features\n");
     printf("  --compile-only Compile only, do not run the binary\n");
     printf("  --header       Check header file(s) syntax (-fsyntax-only)\n");
-    printf("  --project=<file>  Use compile flags from compile_commands.json\n\n");
+    printf("  --project=<file>  Use compile flags from compile_commands.json\n");
+    printf("  --link-flags=<libs>  Extra linker flags (e.g. \"-lm -lpthread\")\n");
+    printf("                   Auto-detected from existing binary if not set\n\n");
 
     print_colored(colors, colors->bold, "Workflow:\n");
     printf("  --cache        Enable incremental analysis caching\n");
@@ -2323,7 +2331,136 @@ void print_usage(const char *prog_name, const ColorCodes *colors)
 }
 
 /*
+ * find_compile_commands - Walk up from start_dir looking for compile_commands.json
+ *                         Checks CWD first, then build/, then parent directories.
+ *                         Returns 0 if found, -1 on failure.
+ */
+int find_compile_commands(const char *start_dir, char *out_path, size_t out_size)
+{
+    char dir[MAX_PATH_LEN];
+    char resolved[MAX_PATH_LEN];
+
+    if (!start_dir || !start_dir[0])
+        start_dir = ".";
+
+    /* Resolve to absolute path */
+    if (!realpath(start_dir, resolved))
+        return -1;
+
+    snprintf(dir, sizeof(dir), "%s", resolved);
+
+    while (dir[0]) {
+        /* Check for compile_commands.json in current dir */
+        snprintf(out_path, out_size, "%s/compile_commands.json", dir);
+        if (access(out_path, R_OK) == 0)
+            return 0;
+
+        /* Check in build/ subdirectory */
+        snprintf(out_path, out_size, "%s/build/compile_commands.json", dir);
+        if (access(out_path, R_OK) == 0)
+            return 0;
+
+        /* Go up one directory */
+        char *last = strrchr(dir, '/');
+        if (!last || last == dir) {
+            /* At root — check root once then give up */
+            if (last == dir && dir[1] == '\0')
+                break;
+            /* Last chance: root dir if we haven't checked it */
+            if (last == dir) {
+                dir[1] = '\0'; /* "/" */
+                continue;
+            }
+            break;
+        }
+        *last = '\0';
+    }
+
+    out_path[0] = '\0';
+    return -1;
+}
+
+/*
+ * get_project_sources - Extract all source file paths from compile_commands.json
+ *
+ * Uses jq to extract each entry's directory + file, deduplicates,
+ * and stores full paths. Returns number of sources found, or -1 on error.
+ */
+int get_project_sources(const char *json_path, char (*sources)[MAX_PATH_LEN], int max_sources)
+{
+    char cmd[8192];
+    char buf[65536];
+    FILE *pipe;
+    int count = 0;
+
+    /* Check if jq is available */
+    if (system("command -v jq > /dev/null 2>&1") != 0)
+        return -1;
+
+    /* Extract directory+file for each entry, sort unique.
+     * Handle both relative and absolute .file fields. */
+    snprintf(cmd, sizeof(cmd),
+             "jq -r '.[] | if (.file | startswith(\"/\")) then .file else \"\\(.directory)/\\(.file)\" end' '%s' 2>/dev/null | sort -u",
+             json_path);
+
+    pipe = popen(cmd, "r");
+    if (!pipe)
+        return -1;
+
+    while (fgets(buf, sizeof(buf), pipe) && count < max_sources) {
+        size_t len = strlen(buf);
+        /* Strip trailing newline */
+        while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r'))
+            buf[--len] = '\0';
+        if (len == 0 || len >= MAX_PATH_LEN)
+            continue;
+
+        /* Normalize path: resolve relative components, remove double slashes.
+         * realpath resolves symlinks, which is correct for finding the real source path. */
+        char *resolved = realpath(buf, NULL);
+        if (resolved) {
+            if (strlen(resolved) < MAX_PATH_LEN) {
+                memcpy(sources[count], resolved, strlen(resolved) + 1);
+                /* Deduplicate against earlier entries */
+                bool dup = false;
+                for (int j = 0; j < count; j++) {
+                    if (strcmp(sources[j], sources[count]) == 0) {
+                        dup = true;
+                        break;
+                    }
+                }
+                if (!dup)
+                    count++;
+            }
+            free(resolved);
+        } else {
+            /* Can't resolve — use as-is but skip if it looks like a header */
+            const char *dot = strrchr(buf, '.');
+            if (dot && (strcmp(dot, ".c") == 0 ||
+                        strcmp(dot, ".cpp") == 0 ||
+                        strcmp(dot, ".cxx") == 0 ||
+                        strcmp(dot, ".cc") == 0)) {
+                bool dup = false;
+                for (int j = 0; j < count; j++) {
+                    if (strcmp(sources[j], buf) == 0) {
+                        dup = true;
+                        break;
+                    }
+                }
+                if (!dup)
+                    memcpy(sources[count++], buf, len + 1);
+            }
+        }
+    }
+
+    pclose(pipe);
+    return count;
+}
+
+/*
  * parse_compile_commands - Extract compile flags for a source file
+ *
+ * Matches by filename first (endswith), then full path, then basename.
  */
 int parse_compile_commands(const char *json_path, const char *source_file,
                           char *flags_output, size_t flags_size)
@@ -2338,9 +2475,12 @@ int parse_compile_commands(const char *json_path, const char *source_file,
         return -1;
     }
 
-    /* Use jq to extract the command for this source file */
+    /* Use jq to extract the command for this source file.
+     * Match against the full path (directory + "/" + file) so that
+     * both basename and full-path matching works correctly.
+     * Handle both relative and absolute .file fields. */
     snprintf(cmd, sizeof(cmd),
-             "jq -r '.[] | select(.file | endswith(\"%s\")) | .command' '%s' 2>/dev/null",
+             "jq -r '[.[] | select((if (.file | startswith(\"/\")) then .file else \"\\(.directory)/\\(.file)\" end) | endswith(\"%s\"))] | .[0] | .command' '%s' 2>/dev/null",
              source_file, json_path);
 
     pipe = popen(cmd, "r");
@@ -2364,6 +2504,50 @@ int parse_compile_commands(const char *json_path, const char *source_file,
 }
 
 /*
+ * clean_compile_flags - Strip compiler name, -c, -o <arg>, -S, source/object files
+ *                       from a raw compile_commands.json command string
+ */
+void clean_compile_flags(const char *raw_flags, char *cleaned, size_t cleaned_size)
+{
+    size_t cp = 0;
+    const char *f = raw_flags;
+    bool skip_next = false;
+    bool first = true;
+
+    while (*f && cp < cleaned_size - 2) {
+        while (*f == ' ' || *f == '\t') f++;
+        if (!*f) break;
+
+        const char *end = f;
+        while (*end && *end != ' ' && *end != '\t') end++;
+        size_t tlen = (size_t)(end - f);
+
+        if (skip_next) { skip_next = false; f = end; continue; }
+        if (first) { first = false; f = end; continue; }
+        if (tlen == 2 && strncmp(f, "-c", 2) == 0) { f = end; continue; }
+        if (tlen == 2 && strncmp(f, "-o", 2) == 0) { skip_next = true; f = end; continue; }
+        if (tlen == 2 && strncmp(f, "-S", 2) == 0) { f = end; continue; }
+
+        /* Skip source/object file paths (tokens not starting with '-') */
+        if (f[0] != '-') {
+            bool is_file = false;
+            if (tlen >= 2 && strncmp(end - 2, ".c", 2) == 0) is_file = true;
+            if (tlen >= 4 && strncmp(end - 4, ".cpp", 4) == 0) is_file = true;
+            if (tlen >= 2 && strncmp(end - 2, ".o", 2) == 0) is_file = true;
+            if (is_file) { f = end; continue; }
+        }
+
+        if (cp > 0) cleaned[cp++] = ' ';
+        if (cp + tlen < cleaned_size - 1) {
+            memcpy(cleaned + cp, f, tlen);
+            cp += tlen;
+        }
+        f = end;
+    }
+    cleaned[cp] = '\0';
+}
+
+/*
  * run_with_compile_flags - Compile using flags from compile_commands.json
  *
  * The raw "command" field from compile_commands.json includes the compiler
@@ -2381,45 +2565,7 @@ int run_with_compile_flags(const char **sources, int source_count,
     int i;
     size_t pos;
 
-    /* Strip compiler name, -c, -o <arg>, -S, source/object files */
-    {
-        size_t cp = 0;
-        const char *f = flags;
-        bool skip_next = false;
-        bool first = true;
-
-        while (*f && cp < sizeof(cleaned) - 2) {
-            while (*f == ' ' || *f == '\t') f++;
-            if (!*f) break;
-
-            const char *end = f;
-            while (*end && *end != ' ' && *end != '\t') end++;
-            size_t tlen = (size_t)(end - f);
-
-            if (skip_next) { skip_next = false; f = end; continue; }
-            if (first) { first = false; f = end; continue; }
-            if (tlen == 2 && strncmp(f, "-c", 2) == 0) { f = end; continue; }
-            if (tlen == 2 && strncmp(f, "-o", 2) == 0) { skip_next = true; f = end; continue; }
-            if (tlen == 2 && strncmp(f, "-S", 2) == 0) { f = end; continue; }
-
-            /* Skip source/object file paths (tokens not starting with '-') */
-            if (f[0] != '-') {
-                bool is_file = false;
-                if (tlen >= 2 && strncmp(end - 2, ".c", 2) == 0) is_file = true;
-                if (tlen >= 4 && strncmp(end - 4, ".cpp", 4) == 0) is_file = true;
-                if (tlen >= 2 && strncmp(end - 2, ".o", 2) == 0) is_file = true;
-                if (is_file) { f = end; continue; }
-            }
-
-            if (cp > 0) cleaned[cp++] = ' ';
-            if (cp + tlen < sizeof(cleaned) - 1) {
-                memcpy(cleaned + cp, f, tlen);
-                cp += tlen;
-            }
-            f = end;
-        }
-        cleaned[cp] = '\0';
-    }
+    clean_compile_flags(flags, cleaned, sizeof(cleaned));
 
     pos = snprintf(cmd, sizeof(cmd), "%s %s -o '%s'",
                    is_cpp_file(sources[0]) ? "g++" : "gcc",
@@ -2446,6 +2592,306 @@ int run_with_compile_flags(const char **sources, int source_count,
     output[bytes_read] = '\0';
 
     return pclose(pipe);
+}
+
+/*
+ * compile_project_binary - Compile each source with its own flags, then link
+ *
+ * For each source file, looks up its compile flags in compile_commands.json,
+ * compiles it to a .o file individually, then links all .o files together.
+ * This avoids the "compile all with flags from first file" problem.
+ */
+int compile_project_binary(const char *json_path, const char **sources,
+                            int source_count, const char *extra_flags,
+                            const char *link_flags,
+                            const char *binary,
+                            char *output, size_t output_size)
+{
+    char obj_files[256][MAX_PATH_LEN];
+    int obj_count = 0;
+    int i;
+    bool has_cpp = false;
+
+    /* Phase 1: Compile each source to .o with its own flags */
+    for (i = 0; i < source_count; i++) {
+        char file_flags[8192];
+        char cleaned[8192];
+        char cmd[16384];
+        char obj_path[MAX_PATH_LEN];
+        FILE *pipe;
+
+        /* Detect C++ sources for the linker */
+        if (is_cpp_file(sources[i]))
+            has_cpp = true;
+
+        /* Get flags for this specific file from JSON */
+        if (parse_compile_commands(json_path, sources[i],
+                                   file_flags, sizeof(file_flags)) != 0) {
+            snprintf(output, output_size,
+                     "No compile flags found for %s in %s",
+                     sources[i], json_path);
+            goto cleanup;
+        }
+
+        /* Clean flags: strip compiler name, -c, -o, -S, source/object files */
+        clean_compile_flags(file_flags, cleaned, sizeof(cleaned));
+
+        /* Build per-file compile command.
+         * file_flags has the form: "/path/to/gcc -flag1 -flag2 ..."
+         * We extract the compiler from the first token and prepend extra_flags. */
+        const char *p = file_flags;
+        while (*p && *p != ' ' && *p != '\t') p++;
+        size_t plen = (size_t)(p - file_flags);
+
+        snprintf(obj_path, sizeof(obj_path), "/tmp/prism_%d_%d.o",
+                 (int)getpid(), i);
+
+        if (extra_flags && extra_flags[0]) {
+            snprintf(cmd, sizeof(cmd),
+                     "%.*s %s %s -c -o '%s' '%s' 2>&1",
+                     (int)plen, file_flags, extra_flags, cleaned,
+                     obj_path, sources[i]);
+        } else {
+            snprintf(cmd, sizeof(cmd),
+                     "%.*s %s -c -o '%s' '%s' 2>&1",
+                     (int)plen, file_flags, cleaned,
+                     obj_path, sources[i]);
+        }
+
+        pipe = popen(cmd, "r");
+        if (!pipe) {
+            snprintf(output, output_size,
+                     "Failed to start compiler for %s", sources[i]);
+            unlink(obj_path);
+            goto cleanup;
+        }
+
+        size_t n = fread(output, 1, output_size - 1, pipe);
+        output[n] = '\0';
+        int status = pclose(pipe);
+
+        if (status != 0) {
+            /* output already has the error message */
+            unlink(obj_path);
+            goto cleanup;
+        }
+
+        memcpy(obj_files[obj_count++], obj_path, sizeof(obj_files[0]));
+    }
+
+    if (obj_count == 0) {
+        snprintf(output, output_size, "No object files to link");
+        goto cleanup;
+    }
+
+    /* Phase 2: Link all .o files into the final binary */
+    {
+        char link_cmd[32768];
+        size_t pos = snprintf(link_cmd, sizeof(link_cmd),
+                              "%s %s",
+                              has_cpp ? "g++" : "gcc",
+                              extra_flags ? extra_flags : "");
+
+        for (i = 0; i < obj_count; i++) {
+            pos += snprintf(link_cmd + pos, sizeof(link_cmd) - pos,
+                            " '%s'", obj_files[i]);
+            if (pos >= sizeof(link_cmd) - 64) break;
+        }
+
+        /* Append manual link flags if provided */
+        if (link_flags && link_flags[0]) {
+            pos += snprintf(link_cmd + pos, sizeof(link_cmd) - pos,
+                            " %s", link_flags);
+        }
+
+        pos += snprintf(link_cmd + pos, sizeof(link_cmd) - pos,
+                        " -o '%s' 2>&1", binary);
+
+        FILE *pipe = popen(link_cmd, "r");
+        if (!pipe) {
+            snprintf(output, output_size, "Failed to start linker");
+            goto cleanup;
+        }
+
+        size_t n = fread(output, 1, output_size - 1, pipe);
+        output[n] = '\0';
+        int status = pclose(pipe);
+
+        if (status != 0) {
+            /* Linking failed — try auto-detecting libraries from
+             * the project's pre-built binary via ldd and retry */
+            if (!link_flags || !link_flags[0]) {
+                char auto_flags[4096] = {0};
+                if (auto_detect_link_flags(json_path, sources, source_count,
+                                           auto_flags, sizeof(auto_flags)) == 0 &&
+                    auto_flags[0]) {
+                    /* Rebuild link command with auto-detected flags */
+                    char retry_cmd[32768];
+                    pos = snprintf(retry_cmd, sizeof(retry_cmd),
+                                   "%s %s",
+                                   has_cpp ? "g++" : "gcc",
+                                   extra_flags ? extra_flags : "");
+                    for (i = 0; i < obj_count; i++) {
+                        pos += snprintf(retry_cmd + pos, sizeof(retry_cmd) - pos,
+                                        " '%s'", obj_files[i]);
+                        if (pos >= sizeof(retry_cmd) - 64) break;
+                    }
+                    pos += snprintf(retry_cmd + pos, sizeof(retry_cmd) - pos,
+                                    " %s -o '%s' 2>&1",
+                                    auto_flags, binary);
+
+                    FILE *rpipe = popen(retry_cmd, "r");
+                    if (rpipe) {
+                        n = fread(output, 1, output_size - 1, rpipe);
+                        output[n] = '\0';
+                        int rstatus = pclose(rpipe);
+
+                        if (rstatus == 0) {
+                            /* Auto-detected flags worked! */
+                            goto linked;
+                        }
+                        /* output has the retry linker error */
+                    }
+                }
+            }
+            goto cleanup;
+        }
+    }
+
+linked: /* Successfully linked */
+    output[0] = '\0';
+
+    /* Clean up .o files */
+    for (i = 0; i < obj_count; i++)
+        unlink(obj_files[i]);
+
+    return 0;
+
+cleanup:
+    for (i = 0; i < obj_count; i++)
+        unlink(obj_files[i]);
+    return -1;
+}
+
+/*
+ * auto_detect_link_flags - Extract library flags from the project's pre-built binary
+ *
+ * Looks for an executable in the project's build directory that was compiled from
+ * the same source files. Runs ldd on it and converts shared library names to -l
+ * flags. This lets prism link projects with external dependencies (Python, ncurses,
+ * etc.) without the user having to manually specify --link-flags.
+ */
+int auto_detect_link_flags(const char *json_path, const char **sources,
+                            int source_count,
+                            char *flags_buf, size_t flags_size)
+{
+    char build_dir[MAX_PATH_LEN] = {0};
+    char ldd_cmd[8192];
+    char line_buf[4096];
+    FILE *pipe;
+    size_t flen = 0;
+
+    (void)sources;
+    (void)source_count;
+
+    if (!json_path || !json_path[0])
+        return -1;
+
+    /* Get build directory from compile_commands.json (first entry) */
+    snprintf(ldd_cmd, sizeof(ldd_cmd),
+             "jq -r '.[0].directory' '%s' 2>/dev/null | head -1",
+             json_path);
+    pipe = popen(ldd_cmd, "r");
+    if (pipe) {
+        size_t n = fread(build_dir, 1, sizeof(build_dir) - 1, pipe);
+        build_dir[n] = '\0';
+        pclose(pipe);
+        trim_whitespace(build_dir);
+    }
+
+    if (!build_dir[0])
+        return -1;
+
+    /* Look for an executable in the build directory that was compiled
+     * from one of the source files (same basename, newer timestamp) */
+    flags_buf[0] = '\0';
+
+    /* Find all executables in the build directory, pick the most recently
+     * modified one that's linked against at least some of the same source files */
+    char find_cmd[8192];
+    snprintf(find_cmd, sizeof(find_cmd),
+             "find '%s' -maxdepth 2 -type f -executable 2>/dev/null | "
+             "xargs -r file 2>/dev/null | grep -i 'ELF.*executable' | "
+             "sed 's/:.*//' | head -5",
+             build_dir);
+
+    pipe = popen(find_cmd, "r");
+    if (!pipe)
+        return -1;
+
+    char bin_paths[5][MAX_PATH_LEN];
+    int bin_count = 0;
+
+    while (bin_count < 5) {
+        if (!fgets(bin_paths[bin_count], sizeof(bin_paths[0]), pipe))
+            break;
+        size_t n = strlen(bin_paths[bin_count]);
+        while (n > 0 && (bin_paths[bin_count][n-1] == '\n' ||
+                         bin_paths[bin_count][n-1] == '\r'))
+            bin_paths[bin_count][--n] = '\0';
+        if (n > 0)
+            bin_count++;
+    }
+    pclose(pipe);
+
+    if (bin_count == 0)
+        return -1;
+
+    /* Try each binary. Use the first one that ldd produces output for. */
+    for (int bi = 0; bi < bin_count; bi++) {
+        char found[MAX_PATH_LEN];
+        snprintf(found, sizeof(found), "%s", bin_paths[bi]);
+        flen = 0;
+        flags_buf[0] = '\0';
+
+        /* Run ldd and extract library names, convert to -l flags */
+        snprintf(ldd_cmd, sizeof(ldd_cmd),
+                 "ldd '%s' 2>/dev/null | "
+                 "awk '{print $1}' | "
+                 "grep -v '^ld-linux\\|^linux-vdso\\|^libc\\.so\\|^libm\\.so\\|^libgcc_s\\|^libstdc++\\|^libpthread\\|^libdl\\|librt\\|^libresolv' | "
+                 "sed 's/^\\(lib\\)//; s/\\.so.*$//' | "
+                 "sort -u",
+                 found);
+
+        FILE *ldd_pipe = popen(ldd_cmd, "r");
+        if (!ldd_pipe)
+            continue;
+
+        while (fgets(line_buf, sizeof(line_buf), ldd_pipe) && flen < flags_size - 64) {
+            size_t ln = strlen(line_buf);
+            while (ln > 0 && (line_buf[ln-1] == '\n' || line_buf[ln-1] == '\r'))
+                line_buf[--ln] = '\0';
+            if (ln == 0)
+                continue;
+
+            /* filter out versioned libs that don't make sense as -l flags */
+            if (strchr(line_buf, '.') || strchr(line_buf, '/'))
+                continue;
+
+            if (flen > 0)
+                flen += snprintf(flags_buf + flen, flags_size - flen, " ");
+            flen += snprintf(flags_buf + flen, flags_size - flen, "-l%s", line_buf);
+        }
+        pclose(ldd_pipe);
+
+        if (flen > 0) {
+            trim_whitespace(flags_buf);
+            return 0;
+        }
+    }
+
+    flags_buf[0] = '\0';
+    return -1;
 }
 
 /*
@@ -4466,6 +4912,7 @@ int main(int argc, char *argv[])
     char binary_path[MAX_PATH_LEN];
     const char *source_files[MAX_SRC_FILES];
     int source_count = 0;
+    char project_source_store[MAX_SRC_FILES][MAX_PATH_LEN];
     bool keep_binary = false;
     bool use_color = true;
     bool use_tsan = false;
@@ -4505,6 +4952,7 @@ int main(int argc, char *argv[])
     bool use_uninstall_hook = false;
     bool use_ast = false;
     char baseline_path[MAX_PATH_LEN] = {0};
+    char link_flags_buf[4096] = {0};
     char git_bisect_ref[256] = {0};
 
     use_color = isatty(STDOUT_FILENO);
@@ -4592,6 +5040,9 @@ int main(int argc, char *argv[])
             project_json[sizeof(project_json) - 1] = '\0';
         } else if (strncmp(argv[i], "--html=", 7) == 0) {
             html_path = argv[i] + 7;
+        } else if (strncmp(argv[i], "--link-flags=", 13) == 0) {
+            strncpy(link_flags_buf, argv[i] + 13, sizeof(link_flags_buf) - 1);
+            link_flags_buf[sizeof(link_flags_buf) - 1] = '\0';
         } else if (strcmp(argv[i], "--compile-only") == 0) {
             use_compile_only = true;
         } else if (strcmp(argv[i], "--header") == 0) {
@@ -4624,7 +5075,64 @@ int main(int argc, char *argv[])
         init_colors(&colors, use_color);
     }
 
+    /* Auto-detect compile_commands.json */
+    {
+        /* Handle directory arguments: e.g. "prism --full my_project/" */
+        int new_count = 0;
+        for (i = 0; i < source_count; i++) {
+            if (is_directory(source_files[i])) {
+                if (!project_json[0]) {
+                    char detected[MAX_PATH_LEN];
+                    if (find_compile_commands(source_files[i],
+                                              detected,
+                                              sizeof(detected)) == 0) {
+                        strncpy(project_json, detected,
+                                sizeof(project_json) - 1);
+                        print_colored(&colors, colors.cyan, "[project] ");
+                        printf("Auto-detected: %s\n", project_json);
+                    }
+                }
+                /* Directory is not a source file */
+            } else {
+                source_files[new_count++] = source_files[i];
+            }
+        }
+        source_count = new_count;
+
+        /* If no --project provided and nothing was explicitly given,
+         * try auto-detecting from CWD */
+        if (!project_json[0] && source_count == 0) {
+            char detected[MAX_PATH_LEN];
+            if (find_compile_commands(".", detected,
+                                      sizeof(detected)) == 0) {
+                strncpy(project_json, detected,
+                        sizeof(project_json) - 1);
+                print_colored(&colors, colors.cyan, "[project] ");
+                printf("Auto-detected: %s\n", project_json);
+            }
+        }
+
+        /* Auto-collect sources from project JSON if no explicit files given */
+        if (project_json[0] && source_count == 0) {
+            int collected = get_project_sources(project_json,
+                                                 project_source_store,
+                                                 MAX_SRC_FILES);
+            if (collected > 0) {
+                for (i = 0; i < collected; i++)
+                    source_files[source_count++] = project_source_store[i];
+                print_colored(&colors, colors.cyan, "[project] ");
+                printf("Found %d source files in %s\n",
+                       source_count, project_json);
+            }
+        }
+    }
+
     if (source_count == 0) {
+        if (project_json[0]) {
+            print_colored(&colors, colors.yellow, "[project] ");
+            printf("Could not extract any source files from %s\n",
+                   project_json);
+        }
         print_usage(argv[0], &colors);
         return EXIT_USAGE_ERROR;
     }
@@ -5310,77 +5818,43 @@ int main(int argc, char *argv[])
 
     /* Use compile_commands.json if specified */
     if (project_json[0]) {
-        char project_flags[4096];
-        if (parse_compile_commands(project_json, source_files[0],
-                                   project_flags, sizeof(project_flags)) == 0) {
-            print_colored(&colors, colors.cyan, "[project] ");
-            printf("Using flags from %s\n", project_json);
+        print_colored(&colors, colors.cyan, "[project] ");
+        printf("Compiling %d files with project flags: %s\n",
+               source_count, project_json);
 
-            /* Determine mode-specific extra flags (sanitizers, etc.) */
-            const char *extra_flags = "";
-            if (use_full)
-                extra_flags = "-fsanitize=address,undefined -g -fno-omit-frame-pointer -O1";
-            else if (use_tsan)
-                extra_flags = "-fsanitize=thread -g -fno-omit-frame-pointer -O1";
-            else if (use_msan)
-                extra_flags = "-fsanitize=memory -fno-omit-frame-pointer -fsanitize-memory-track-origins -g -O1";
-            else if (use_analyzer)
-                extra_flags = "-fanalyzer -O2 -g -Wuninitialized -Wstrict-aliasing=2 -Wformat-overflow=2 -Wstringop-overflow=2";
+        /* Determine mode-specific extra flags (sanitizers, etc.) */
+        const char *extra_flags = "";
+        if (use_full)
+            extra_flags = "-fsanitize=address,undefined -g -fno-omit-frame-pointer -O1";
+        else if (use_tsan)
+            extra_flags = "-fsanitize=thread -g -fno-omit-frame-pointer -O1";
+        else if (use_msan)
+            extra_flags = "-fsanitize=memory -fno-omit-frame-pointer -fsanitize-memory-track-origins -g -O1";
+        else if (use_analyzer)
+            extra_flags = "-fanalyzer -O2 -g -Wuninitialized -Wstrict-aliasing=2 -Wformat-overflow=2 -Wstringop-overflow=2";
 
-            /* Combine mode flags with project includes.
-             * project_flags has the form: "compiler -flag1 -flag2 ..."
-             * The tokenizer in run_with_compile_flags strips the first
-             * token (compiler path), then strips -c, -o, etc.
-             * Insert extra_flags after the first token so they survive
-             * the tokenizer. */
-            char compile_flags[8192];
-            if (extra_flags[0]) {
-                const char *p = project_flags;
-                while (*p && *p != ' ' && *p != '\t') p++;
-                size_t plen = (size_t)(p - project_flags);
-                snprintf(compile_flags, sizeof(compile_flags),
-                         "%.*s %s%s",
-                         (int)plen, project_flags, extra_flags, p);
-            } else {
-                snprintf(compile_flags, sizeof(compile_flags),
-                         "%s", project_flags);
-            }
-
-            bool project_compiled = false;
-            if (run_with_compile_flags(source_files, source_count,
-                                       compile_flags,
-                                       binary_path,
-                                       result.compiler_output,
-                                       sizeof(result.compiler_output)) == 0) {
-                project_compiled = true;
-            }
-
-            /* If both failed, check if it's only linker errors
-             * (expected for multi-file projects — missing symbols from
-             *  other translation units, not a real compile failure) */
-            if (!project_compiled) {
-                bool fatal = strstr(result.compiler_output, "fatal error:") != NULL;
-                if (!fatal) {
-                    /* compilation succeeded (only linker errors), use the binary */
-                    project_compiled = true;
-                }
-            }
-
-            if (project_compiled) {
-                /* Only short-circuit the compile chain for modes that
-                 * need a runnable binary. Source-level modes (clang-tidy,
-                 * analyzer) handle themselves in the compile chain. */
-                bool needs_run_binary = use_full || use_quick ||
-                    use_tsan || use_msan || use_valgrind ||
-                    use_fuzz || rerun_count > 0 || use_resources ||
-                    use_gcov || use_libfuzzer;
-                if (needs_run_binary)
-                    result.compilation_success = true;
-            }
+        /* Compile each file with its own flags from JSON, then link */
+        if (compile_project_binary(project_json,
+                                   source_files, source_count,
+                                   extra_flags,
+                                   link_flags_buf[0] ? link_flags_buf : NULL,
+                                   binary_path,
+                                   result.compiler_output,
+                                   sizeof(result.compiler_output)) == 0) {
+            bool needs_run_binary = use_full || use_quick ||
+                use_tsan || use_msan || use_valgrind ||
+                use_fuzz || rerun_count > 0 || use_resources ||
+                use_gcov || use_libfuzzer;
+            if (needs_run_binary)
+                result.compilation_success = true;
         } else {
-            print_colored(&colors, colors.yellow, "[project] ");
-            printf("Could not parse %s, falling back to auto-detection\n",
-                   project_json);
+            /* Per-file compile succeeded but linking may have failed
+             * (partial project — not all required .o files linked in).
+             * Treat as compilation success if no fatal compile errors. */
+            if (!strstr(result.compiler_output, "fatal error:") &&
+                strstr(result.compiler_output, "undefined reference")) {
+                result.compilation_success = true;
+            }
         }
     }
 

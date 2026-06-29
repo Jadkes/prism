@@ -266,6 +266,45 @@ bool is_source_file(const char *path);
 
 bool is_cpp_file(const char *path);
 
+bool is_directory(const char *path);
+
+/*
+ * find_compile_commands - Walk up from start_dir looking for compile_commands.json
+ *                         or build/compile_commands.json. Returns 0 if found.
+ */
+int find_compile_commands(const char *start_dir, char *out_path, size_t out_size);
+
+/*
+ * get_project_sources - Extract all source file paths from compile_commands.json
+ */
+int get_project_sources(const char *json_path, char (*sources)[MAX_PATH_LEN], int max_sources);
+
+/*
+ * clean_compile_flags - Strip compiler name, -c, -o, source/object files
+ *                       from a raw compile_commands.json command string
+ */
+void clean_compile_flags(const char *raw_flags, char *cleaned, size_t cleaned_size);
+
+/*
+ * compile_project_binary - Compile each source with its own flags from
+ *                           compile_commands.json, then link all .o files
+ *                           into the final binary.
+ */
+int compile_project_binary(const char *json_path, const char **sources,
+                            int source_count, const char *extra_flags,
+                            const char *link_flags,
+                            const char *binary,
+                            char *output, size_t output_size);
+
+/*
+ * auto_detect_link_flags - Look for a pre-built binary in the project's build
+ *                           directory and extract library link flags via ldd.
+ *                           Returns 0 if flags were found.
+ */
+int auto_detect_link_flags(const char *json_path, const char **sources,
+                            int source_count,
+                            char *flags_buf, size_t flags_size);
+
 /*
  * has_main_function - Check if source file contains main()
  */
