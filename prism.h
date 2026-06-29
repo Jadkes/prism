@@ -10,8 +10,8 @@
  *         output and provides human-readable fix suggestions.
  */
 
-#ifndef C_TESTER_H
-#define C_TESTER_H
+#ifndef PRISM_H
+#define PRISM_H
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -394,4 +394,4 @@ void save_cache_entry(const char *hash, bool success,
 int load_cache_entry(const char *hash, bool *success,
                       char *compiler_output, size_t output_size);
 
-#endif /* C_TESTER_H */
+#endif /* PRISM_H */
