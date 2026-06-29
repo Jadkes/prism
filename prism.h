@@ -55,6 +55,7 @@ typedef enum {
     ERR_LOGIC_ERROR,
     ERR_PURE_VIRTUAL,
     ERR_DOUBLE_FREE_CPP,
+    ERR_HARDENING,
     ERR_UNKNOWN,
     ERR_NONE
 } ErrorType;
@@ -121,6 +122,13 @@ void print_summary(const ColorCodes *colors, const TestResult *result, int error
 int compile_with_sanitizers(const char **sources, int source_count,
                              const char *binary,
                              char *output, size_t output_size);
+
+/*
+ * compile_with_msan - Compile with MemorySanitizer
+ */
+int compile_with_msan(const char **sources, int source_count,
+                       const char *binary,
+                       char *output, size_t output_size);
 
 /*
  * compile_with_tsan - Compile source files with ThreadSanitizer
@@ -291,6 +299,20 @@ int run_max_analysis(const char **sources, int source_count,
                      const ColorCodes *colors);
 
 /*
+ * generate_sarif_report - Write SARIF v2.1.0 JSON report
+ */
+int generate_sarif_report(const char *sarif_path,
+                           const DetectedError *errors, int error_count,
+                           long execution_time_ms);
+
+/*
+ * generate_ci_output - Write CI-friendly JSON summary to stdout
+ */
+void generate_ci_output(const char **source_files, int source_count,
+                         const DetectedError *errors, int error_count,
+                         int exit_status, long execution_time_ms);
+
+/*
  * generate_html_report - Write HTML report with error details
  */
 int generate_html_report(const char *html_path, const char **source_files,
@@ -322,6 +344,12 @@ int check_resource_leaks(const char *binary,
                          DetectedError *errors, int max_errors,
                          char *sanitizer_output, size_t sanitizer_size,
                          int timeout_sec);
+
+/*
+ * check_binary_harden - Check ELF binary for security hardening features
+ */
+int check_binary_harden(const char *binary,
+                         DetectedError *errors, int max_errors);
 
 /*
  * scan_dangerous_apis - Scan source for dangerous C functions

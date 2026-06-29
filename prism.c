@@ -64,6 +64,46 @@ int compile_with_sanitizers(const char **sources, int source_count,
 }
 
 /** 
+ * compile_with_msan - Compile with MemorySanitizer (uninit memory reads)
+ */
+int compile_with_msan(const char **sources, int source_count,
+                       const char *binary,
+                       char *output, size_t output_size)
+{
+    char cmd[MAX_PATH_LEN * 8 + 128];
+    FILE *pipe;
+    size_t bytes_read;
+    int i;
+    size_t pos;
+
+    pos = snprintf(cmd, sizeof(cmd),
+                   "gcc -fsanitize=memory -fsanitize-memory-track-origins "
+                   "-fno-omit-frame-pointer -g -O1 -o '%s'", binary);
+
+    for (i = 0; i < source_count && pos < sizeof(cmd) - 4; i++) {
+        pos += snprintf(cmd + pos, sizeof(cmd) - pos, " '%s'", sources[i]);
+    }
+
+    if (pos >= sizeof(cmd) - 4) {
+        snprintf(output, output_size, "Too many source files: command buffer overflow");
+        return -1;
+    }
+
+    pos += snprintf(cmd + pos, sizeof(cmd) - pos, " 2>&1");
+
+    pipe = popen(cmd, "r");
+    if (!pipe) {
+        snprintf(output, output_size, "Failed to start compiler");
+        return -1;
+    }
+
+    bytes_read = fread(output, 1, output_size - 1, pipe);
+    output[bytes_read] = '\0';
+
+    return pclose(pipe);
+}
+
+/*
  * compile_with_tsan - Compile source files with ThreadSanitizer
  */
 int compile_with_tsan(const char **sources, int source_count,
@@ -1284,6 +1324,7 @@ const char *get_error_name(ErrorType type)
     case ERR_LOGIC_ERROR:      return "Logic Error";
     case ERR_PURE_VIRTUAL:    return "Pure Virtual Method Called";
     case ERR_DOUBLE_FREE_CPP: return "Double Free or Corruption";
+    case ERR_HARDENING:       return "Binary Hardening";
     case ERR_UNKNOWN:         return "Unknown Error";
     case ERR_NONE:            return "No Error";
     }
@@ -1567,6 +1608,148 @@ void print_summary(const ColorCodes *colors, const TestResult *result,
         if (result->compiler_output[0])
             printf("%s\n", result->compiler_output);
     }
+}
+
+/*
+ * generate_sarif_report - Write SARIF v2.1.0 JSON report
+ */
+int generate_sarif_report(const char *sarif_path,
+                           const DetectedError *errors, int error_count,
+                           long execution_time_ms)
+{
+    FILE *fp;
+    int i;
+
+    if (!sarif_path || !sarif_path[0])
+        return -1;
+
+    fp = fopen(sarif_path, "w");
+    if (!fp)
+        return -1;
+
+    fprintf(fp, "{\n");
+    fprintf(fp, "  \"$schema\": \"https://schemastore.ast/sarif-2.1.0-json-schema.json\",\n");
+    fprintf(fp, "  \"version\": \"2.1.0\",\n");
+    fprintf(fp, "  \"runs\": [\n");
+    fprintf(fp, "    {\n");
+    fprintf(fp, "      \"tool\": {\n");
+    fprintf(fp, "        \"driver\": {\n");
+    fprintf(fp, "          \"name\": \"prism\",\n");
+    fprintf(fp, "          \"version\": \"1.5\",\n");
+    fprintf(fp, "          \"informationUri\": \"https://github.com/Jadkes/Prism\"\n");
+    fprintf(fp, "        }\n");
+    fprintf(fp, "      },\n");
+    fprintf(fp, "      \"results\": [\n");
+
+    for (i = 0; i < error_count; i++) {
+        const char *level = "warning";
+        if (errors[i].severity >= 8)
+            level = "error";
+        else if (errors[i].severity >= 3)
+            level = "warning";
+        else
+            level = "note";
+
+        if (i > 0)
+            fprintf(fp, ",\n");
+
+        fprintf(fp, "        {\n");
+        fprintf(fp, "          \"ruleId\": \"%s\",\n", get_error_name(errors[i].type));
+        fprintf(fp, "          \"level\": \"%s\",\n", level);
+        fprintf(fp, "          \"message\": {\n");
+        fprintf(fp, "            \"text\": \"%s\"", errors[i].title);
+        if (errors[i].fix_suggestion[0]) {
+            fprintf(fp, ",\n");
+            fprintf(fp, "            \"markdown\": \"%s\\n\\n**Suggested fix:** %s\"\n",
+                    errors[i].title, errors[i].fix_suggestion);
+        } else {
+            fprintf(fp, "\n");
+        }
+        fprintf(fp, "          }");
+
+        if (errors[i].has_source && errors[i].source_file[0]) {
+            fprintf(fp, ",\n");
+            fprintf(fp, "          \"locations\": [\n");
+            fprintf(fp, "            {\n");
+            fprintf(fp, "              \"physicalLocation\": {\n");
+            fprintf(fp, "                \"artifactLocation\": {\n");
+            fprintf(fp, "                  \"uri\": \"%s\"\n", errors[i].source_file);
+            fprintf(fp, "                }");
+            if (errors[i].source_line > 0) {
+                fprintf(fp, ",\n");
+                fprintf(fp, "                \"region\": {\n");
+                fprintf(fp, "                  \"startLine\": %d\n", errors[i].source_line);
+                fprintf(fp, "                }\n");
+            } else {
+                fprintf(fp, "\n");
+            }
+            fprintf(fp, "              }\n");
+            fprintf(fp, "            }\n");
+            fprintf(fp, "          ]\n");
+        } else {
+            fprintf(fp, "\n");
+        }
+
+        fprintf(fp, "        }");
+    }
+    fprintf(fp, "\n");
+    fprintf(fp, "      ],\n");
+    fprintf(fp, "      \"columnKind\": \"utf16CodeUnits\",\n");
+    fprintf(fp, "      \"properties\": {\n");
+    fprintf(fp, "        \"executionTimeMs\": %ld\n", execution_time_ms);
+    fprintf(fp, "      }\n");
+    fprintf(fp, "    }\n");
+    fprintf(fp, "  ]\n");
+    fprintf(fp, "}\n");
+
+    fclose(fp);
+    return 0;
+}
+
+/*
+ * generate_ci_output - Write CI-friendly JSON summary to stdout
+ */
+void generate_ci_output(const char **source_files, int source_count,
+                         const DetectedError *errors, int error_count,
+                         int exit_status, long execution_time_ms)
+{
+    const char *status;
+    int i;
+
+    if (exit_status == EXIT_CLEAN)
+        status = "clean";
+    else if (exit_status == EXIT_COMPILE_FAIL)
+        status = "compile_fail";
+    else
+        status = "errors";
+
+    printf("{\n");
+    printf("  \"version\": \"1.5\",\n");
+    printf("  \"status\": \"%s\",\n", status);
+    printf("  \"files\": [\n");
+    for (i = 0; i < source_count; i++) {
+        if (i > 0) printf(",\n");
+        printf("    \"%s\"", source_files[i]);
+    }
+    printf("\n  ],\n");
+    printf("  \"error_count\": %d,\n", error_count);
+    printf("  \"errors\": [\n");
+    for (i = 0; i < error_count; i++) {
+        if (i > 0) printf(",\n");
+        printf("    {\n");
+        printf("      \"type\": \"%s\",\n", get_error_name(errors[i].type));
+        printf("      \"title\": \"%s\",\n", errors[i].title);
+        printf("      \"file\": \"%s\",\n",
+               errors[i].source_file[0] ? errors[i].source_file : "");
+        printf("      \"line\": %d,\n", errors[i].source_line);
+        printf("      \"severity\": %d,\n", errors[i].severity);
+        printf("      \"fix\": \"%s\"\n", errors[i].fix_suggestion);
+        printf("    }");
+    }
+    printf("\n  ],\n");
+    printf("  \"execution_time_ms\": %ld\n", execution_time_ms);
+    printf("}\n");
+    fflush(stdout);
 }
 
 /*
@@ -2067,7 +2250,7 @@ int run_max_analysis(const char **sources, int source_count,
  */
 void print_usage(const char *prog_name, const ColorCodes *colors)
 {
-    print_colored(colors, colors->bold, "prism v1.4 - C Error Detection Tool\n");
+    print_colored(colors, colors->bold, "prism v1.5 - C Error Detection Tool\n");
     printf("Detects memory errors, undefined behavior, and bugs in C/C++ code.\n\n");
 
     print_colored(colors, colors->bold, "Usage: ");
@@ -2083,6 +2266,7 @@ void print_usage(const char *prog_name, const ColorCodes *colors)
     printf("                 clang-tidy + -fanalyzer + fuzz + rerun + gcov +\n");
     printf("                 libfuzzer + danger scan + resource leak + GDB\n");
     printf("  --tsan         Use ThreadSanitizer to detect data races\n");
+    printf("  --msan         Use MemorySanitizer to detect uninitialized reads\n");
     printf("  --analyzer     Use GCC static analyzer (-fanalyzer)\n");
     printf("  --clang-tidy   Run clang-tidy static analysis\n");
     printf("  --valgrind     Run under Valgrind for deep memory analysis\n");
@@ -2096,6 +2280,9 @@ void print_usage(const char *prog_name, const ColorCodes *colors)
     printf("  --gcov         Run with code coverage instrumentation\n");
     printf("  --libfuzzer    Run libFuzzer (requires clang + fuzz target)\n");
     printf("  --gdb          On crash, automatically run GDB for backtrace\n");
+    printf("  --checksec     Check binary for security hardening features\n");
+    printf("  --compile-only Compile only, do not run the binary\n");
+    printf("  --header       Check header file(s) syntax (-fsyntax-only)\n");
     printf("  --project=<file>  Use compile flags from compile_commands.json\n\n");
 
     print_colored(colors, colors->bold, "Workflow:\n");
@@ -2112,6 +2299,8 @@ void print_usage(const char *prog_name, const ColorCodes *colors)
 
     print_colored(colors, colors->bold, "Output:\n");
     printf("  --html=<path>  Generate HTML report at specified path\n");
+    printf("  --sarif[=<path>]  Generate SARIF v2.1.0 report (default: prism_results.sarif)\n");
+    printf("  --ci           CI mode: JSON summary to stdout, strict exit codes\n");
     printf("  --no-color     Disable colored output\n\n");
 
     print_colored(colors, colors->bold, "Execution:\n");
@@ -2544,6 +2733,126 @@ int check_resource_leaks(const char *binary,
     return found;
 }
 
+/*
+ * check_binary_harden - Check ELF binary for security hardening features
+ */
+int check_binary_harden(const char *binary,
+                         DetectedError *errors, int max_errors)
+{
+    int found = 0;
+    char buf[4096];
+    int ret;
+
+    if (!binary || access(binary, X_OK) != 0)
+        return 0;
+
+    /* Check PIE: e_type in ELF header should be DYN (3), not EXEC (2) */
+    snprintf(buf, sizeof(buf),
+             "readelf -h '%s' 2>/dev/null | grep -q 'Type:.*DYN'", binary);
+    ret = system(buf);
+    if (ret != 0) {
+        if (found < max_errors) {
+            errors[found].type = ERR_HARDENING;
+            snprintf(errors[found].title, sizeof(errors[found].title),
+                     "Binary not PIE");
+            snprintf(errors[found].fix_suggestion, sizeof(errors[found].fix_suggestion),
+                     "Compile with -fpie -pie to enable ASLR");
+            errors[found].severity = 5;
+            errors[found].has_source = false;
+            found++;
+        }
+    }
+
+    /* Check NX: PT_GNU_STACK must not have X flag */
+    snprintf(buf, sizeof(buf),
+             "readelf -l '%s' 2>/dev/null | grep -A1 GNU_STACK | "
+             "grep -q -E 'RWE|RWX'", binary);
+    ret = system(buf);
+    if (ret == 0) {
+        if (found < max_errors) {
+            errors[found].type = ERR_HARDENING;
+            snprintf(errors[found].title, sizeof(errors[found].title),
+                     "Stack executable (NX disabled)");
+            snprintf(errors[found].fix_suggestion, sizeof(errors[found].fix_suggestion),
+                     "Compile with -Wa,-noexecstack");
+            errors[found].severity = 8;
+            errors[found].has_source = false;
+            found++;
+        }
+    }
+
+    /* Check stack canary */
+    snprintf(buf, sizeof(buf),
+             "readelf -s '%s' 2>/dev/null | grep -q '__stack_chk_fail'", binary);
+    ret = system(buf);
+    if (ret != 0) {
+        if (found < max_errors) {
+            errors[found].type = ERR_HARDENING;
+            snprintf(errors[found].title, sizeof(errors[found].title),
+                     "No stack canary");
+            snprintf(errors[found].fix_suggestion, sizeof(errors[found].fix_suggestion),
+                     "Compile with -fstack-protector-strong");
+            errors[found].severity = 6;
+            errors[found].has_source = false;
+            found++;
+        }
+    }
+
+    /* Check RELRO */
+    snprintf(buf, sizeof(buf),
+             "readelf -l '%s' 2>/dev/null | grep -q 'GNU_RELRO'", binary);
+    ret = system(buf);
+    if (ret != 0) {
+        if (found < max_errors) {
+            errors[found].type = ERR_HARDENING;
+            snprintf(errors[found].title, sizeof(errors[found].title),
+                     "No RELRO");
+            snprintf(errors[found].fix_suggestion, sizeof(errors[found].fix_suggestion),
+                     "Compile with -Wl,-z,relro");
+            errors[found].severity = 5;
+            errors[found].has_source = false;
+            found++;
+        }
+    } else {
+        /* Check for Full RELRO (BIND_NOW) */
+        snprintf(buf, sizeof(buf),
+                 "readelf -d '%s' 2>/dev/null | grep -q 'BIND_NOW'", binary);
+        ret = system(buf);
+        if (ret != 0) {
+            if (found < max_errors) {
+                errors[found].type = ERR_HARDENING;
+                snprintf(errors[found].title, sizeof(errors[found].title),
+                         "Partial RELRO only");
+                snprintf(errors[found].fix_suggestion, sizeof(errors[found].fix_suggestion),
+                         "Compile with -Wl,-z,now for full RELRO");
+                errors[found].severity = 3;
+                errors[found].has_source = false;
+                found++;
+            }
+        }
+    }
+
+    /* Check RPATH/RUNPATH */
+    snprintf(buf, sizeof(buf),
+             "readelf -d '%s' 2>/dev/null | "
+             "grep -q -E '\\(RPATH|\\(RUNPATH'", binary);
+    ret = system(buf);
+    if (ret == 0) {
+        if (found < max_errors) {
+            errors[found].type = ERR_HARDENING;
+            snprintf(errors[found].title, sizeof(errors[found].title),
+                     "Binary has RPATH/RUNPATH");
+            snprintf(errors[found].fix_suggestion, sizeof(errors[found].fix_suggestion),
+                     "Remove -rpath linker flags; use LD_LIBRARY_PATH instead");
+            errors[found].severity = 4;
+            errors[found].has_source = false;
+            found++;
+        }
+    }
+
+    return found;
+}
+
 struct DangerPattern {
     const char *func;
     const char *title;
@@ -2716,6 +3025,44 @@ int scan_dangerous_apis(const char **sources, int source_count,
 
     free(line_buf);
     return found;
+}
+
+/*
+ * check_header - Compile header with -fsyntax-only, report errors
+ */
+int check_header(const char **sources, int source_count,
+                  char *output, size_t output_size)
+{
+    char cmd[MAX_PATH_LEN * 8 + 128];
+    FILE *pipe;
+    size_t bytes_read;
+    int i;
+    size_t pos;
+
+    pos = snprintf(cmd, sizeof(cmd),
+                   "gcc -x c -fsyntax-only -Wall -Wextra");
+
+    for (i = 0; i < source_count && pos < sizeof(cmd) - 4; i++) {
+        pos += snprintf(cmd + pos, sizeof(cmd) - pos, " '%s'", sources[i]);
+    }
+
+    if (pos >= sizeof(cmd) - 4) {
+        snprintf(output, output_size, "Too many source files: command buffer overflow");
+        return -1;
+    }
+
+    pos += snprintf(cmd + pos, sizeof(cmd) - pos, " 2>&1");
+
+    pipe = popen(cmd, "r");
+    if (!pipe) {
+        snprintf(output, output_size, "Failed to start compiler");
+        return -1;
+    }
+
+    bytes_read = fread(output, 1, output_size - 1, pipe);
+    output[bytes_read] = '\0';
+
+    return pclose(pipe);
 }
 
 /*
@@ -4048,6 +4395,7 @@ int main(int argc, char *argv[])
     bool keep_binary = false;
     bool use_color = true;
     bool use_tsan = false;
+    bool use_msan = false;
     bool use_analyzer = false;
     bool use_clang_tidy = false;
     bool use_valgrind = false;
@@ -4063,10 +4411,16 @@ int main(int argc, char *argv[])
     int error_count = 0;
     int i;
     bool use_quick = false;
+    bool use_compile_only = false;
+    bool use_header = false;
+    bool use_sarif = false;
+    char sarif_path[MAX_PATH_LEN] = {0};
+    bool use_ci = false;
     const char *self_binary = argv[0];
     bool use_full = false;
     bool use_git_diff = false;
     bool use_gdb = false;
+    bool use_checksec = false;
     bool use_gcov = false;
     bool use_libfuzzer = false;
     bool use_ultra = false;
@@ -4103,6 +4457,8 @@ int main(int argc, char *argv[])
             init_colors(&colors, use_color);
         } else if (strcmp(argv[i], "--tsan") == 0) {
             use_tsan = true;
+        } else if (strcmp(argv[i], "--msan") == 0) {
+            use_msan = true;
         } else if (strcmp(argv[i], "--analyzer") == 0) {
             use_analyzer = true;
         } else if (strcmp(argv[i], "--clang-tidy") == 0) {
@@ -4140,6 +4496,8 @@ int main(int argc, char *argv[])
             use_gcov = true;
         } else if (strcmp(argv[i], "--libfuzzer") == 0) {
             use_libfuzzer = true;
+        } else if (strcmp(argv[i], "--checksec") == 0) {
+            use_checksec = true;
         } else if (strcmp(argv[i], "--ast") == 0) {
             use_ast = true;
         } else if (strcmp(argv[i], "--cache") == 0) {
@@ -4160,6 +4518,19 @@ int main(int argc, char *argv[])
             project_json[sizeof(project_json) - 1] = '\0';
         } else if (strncmp(argv[i], "--html=", 7) == 0) {
             html_path = argv[i] + 7;
+        } else if (strcmp(argv[i], "--compile-only") == 0) {
+            use_compile_only = true;
+        } else if (strcmp(argv[i], "--header") == 0) {
+            use_header = true;
+        } else if (strncmp(argv[i], "--sarif=", 8) == 0) {
+            use_sarif = true;
+            strncpy(sarif_path, argv[i] + 8, sizeof(sarif_path) - 1);
+            sarif_path[sizeof(sarif_path) - 1] = '\0';
+        } else if (strcmp(argv[i], "--sarif") == 0) {
+            use_sarif = true;
+            strncpy(sarif_path, "prism_results.sarif", sizeof(sarif_path) - 1);
+        } else if (strcmp(argv[i], "--ci") == 0) {
+            use_ci = true;
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             print_usage(argv[0], &colors);
             return EXIT_SUCCESS;
@@ -4171,6 +4542,12 @@ int main(int argc, char *argv[])
                         MAX_SRC_FILES);
             }
         }
+    }
+
+    /* --ci forces --no-color */
+    if (use_ci) {
+        use_color = false;
+        init_colors(&colors, use_color);
     }
 
     if (source_count == 0) {
@@ -4185,7 +4562,8 @@ int main(int argc, char *argv[])
             return EXIT_FILE_NOT_FOUND;
         }
 
-        if (!is_source_file(source_files[i])) {
+        if (!is_source_file(source_files[i]) &&
+            !(use_header && string_contains(source_files[i], ".h"))) {
             print_colored(&colors, colors.red, "Error: ");
             printf("not a C/C++ source file: %s\n", source_files[i]);
             return EXIT_USAGE_ERROR;
@@ -4370,10 +4748,11 @@ int main(int argc, char *argv[])
     }
 
     /* Default to --quick if no analysis mode was explicitly set */
-    if (!use_tsan && !use_analyzer && !use_clang_tidy &&
+    if (!use_tsan && !use_msan && !use_analyzer && !use_clang_tidy &&
         !use_valgrind && !use_max && !use_fuzz && !use_danger &&
         !use_resources && !use_gcov && !use_libfuzzer && !use_ultra &&
-        !use_full && rerun_count == 0) {
+        !use_full && !use_checksec && !use_header &&
+        !use_compile_only && rerun_count == 0) {
         use_quick = true;
     }
 
@@ -4432,6 +4811,7 @@ int main(int argc, char *argv[])
                 if (keep_binary) child_argv[arg_idx++] = "--keep";
                 child_argv[arg_idx++] = timeout_str;
                 if (use_tsan) child_argv[arg_idx++] = "--tsan";
+                if (use_msan) child_argv[arg_idx++] = "--msan";
                 if (use_clang_tidy) child_argv[arg_idx++] = "--clang-tidy";
                 if (use_valgrind) child_argv[arg_idx++] = "--valgrind";
                 if (use_max) child_argv[arg_idx++] = "--max";
@@ -4441,6 +4821,7 @@ int main(int argc, char *argv[])
                 if (use_ultra) child_argv[arg_idx++] = "--ultra";
                 if (use_git_diff) child_argv[arg_idx++] = "--git-diff";
                 if (use_gdb) child_argv[arg_idx++] = "--gdb";
+                if (use_checksec) child_argv[arg_idx++] = "--checksec";
                 if (use_gcov) child_argv[arg_idx++] = "--gcov";
                 if (use_libfuzzer) child_argv[arg_idx++] = "--libfuzzer";
                 if (use_cache) child_argv[arg_idx++] = "--cache";
@@ -4503,6 +4884,20 @@ int main(int argc, char *argv[])
                 printf("Report saved to: %s\n", html_path);
             }
         }
+        /* --sarif: generate SARIF report */
+        if (use_sarif && sarif_path[0]) {
+            generate_sarif_report(sarif_path,
+                                   errors, error_count,
+                                   result.execution_time_ms);
+        }
+        /* --ci: emit JSON summary to stdout */
+        if (use_ci) {
+            generate_ci_output(source_files, source_count,
+                               errors, error_count,
+                               error_count > 0 ? EXIT_ERRORS_FOUND : EXIT_CLEAN,
+                               result.execution_time_ms);
+        }
+
         return error_count > 0 ? EXIT_ERRORS_FOUND : EXIT_CLEAN;
     }
 
@@ -4526,6 +4921,18 @@ int main(int argc, char *argv[])
             }
         }
         print_summary(&colors, &result, error_count, errors);
+
+        if (use_sarif && sarif_path[0]) {
+            generate_sarif_report(sarif_path,
+                                   errors, error_count,
+                                   result.execution_time_ms);
+        }
+        if (use_ci) {
+            generate_ci_output(source_files, source_count,
+                               errors, error_count,
+                               error_count > 0 ? EXIT_ERRORS_FOUND : EXIT_CLEAN,
+                               result.execution_time_ms);
+        }
         return error_count > 0 ? EXIT_ERRORS_FOUND : EXIT_CLEAN;
     }
 
@@ -4685,6 +5092,85 @@ int main(int argc, char *argv[])
         return EXIT_CLEAN;
     }
 
+    /* --header: compile header with -fsyntax-only */
+    if (use_header) {
+        print_colored(&colors, colors.bold, "=== Header Syntax Check ===\n");
+        int hdr_ret = check_header(source_files, source_count,
+                                    result.compiler_output,
+                                    sizeof(result.compiler_output));
+        if (hdr_ret != 0) {
+            fprintf(stderr, "%s\n", result.compiler_output);
+            fflush(stderr);
+            error_count = parse_sanitizer_errors(result.compiler_output,
+                                                  errors, 32);
+            if (error_count == 0) {
+                /* No structured errors, but compilation failed — create one */
+                errors[0].type = ERR_UNKNOWN;
+                snprintf(errors[0].title, sizeof(errors[0].title),
+                         "Header syntax / missing include");
+                snprintf(errors[0].fix_suggestion, sizeof(errors[0].fix_suggestion),
+                         "Check the compiler output above for missing includes, "
+                         "forward declarations, or syntax errors");
+                errors[0].severity = 5;
+                error_count = 1;
+            }
+            for (i = 0; i < error_count; i++)
+                generate_fix_suggestion(&errors[i]);
+            print_summary(&colors, &result, error_count, errors);
+            if (use_ci) {
+                generate_ci_output(source_files, source_count,
+                                   errors, error_count,
+                                   EXIT_ERRORS_FOUND, 0);
+            }
+            return EXIT_ERRORS_FOUND;
+        }
+        print_colored(&colors, colors.green, "[OK] ");
+        printf("Header(s) passed syntax check\n");
+        if (use_ci) {
+            generate_ci_output(source_files, source_count,
+                               NULL, 0, EXIT_CLEAN, 0);
+        }
+        return EXIT_CLEAN;
+    }
+
+    /* --checksec: compile and check binary hardening */
+    if (use_checksec) {
+        char sec_bin[MAX_PATH_LEN];
+        generate_temp_path("prism_sec", sec_bin, sizeof(sec_bin));
+
+        print_colored(&colors, colors.bold, "=== Binary Hardening Check ===\n");
+
+        int comp_ret = compile_with_basic_flags(source_files, source_count,
+                         sec_bin,
+                         result.compiler_output,
+                         sizeof(result.compiler_output));
+        if (comp_ret != 0) {
+            print_colored(&colors, colors.red, "[COMPILE ERROR]\n");
+            printf("%s\n", result.compiler_output);
+            return EXIT_COMPILE_FAIL;
+        }
+
+        error_count = check_binary_harden(sec_bin, errors, 32);
+
+        if (error_count > 0) {
+            for (i = 0; i < error_count; i++)
+                generate_fix_suggestion(&errors[i]);
+            print_summary(&colors, &result, error_count, errors);
+        } else {
+            print_colored(&colors, colors.green, "[OK] ");
+            printf("Hardening: PIE, NX, canary, RELRO all present\n");
+        }
+
+        unlink(sec_bin);
+        if (use_ci) {
+            generate_ci_output(source_files, source_count,
+                               error_count > 0 ? errors : NULL, error_count,
+                               error_count > 0 ? EXIT_ERRORS_FOUND : EXIT_CLEAN,
+                               0);
+        }
+        return error_count > 0 ? EXIT_ERRORS_FOUND : EXIT_CLEAN;
+    }
+
     generate_temp_path("prism", binary_path, sizeof(binary_path));
 
     /* Use compile_commands.json if specified */
@@ -4765,6 +5251,19 @@ int main(int argc, char *argv[])
             generate_fix_suggestion(&errors[i]);
         print_summary(&colors, &result, error_count, errors);
         if (!keep_binary) unlink(quick_bin);
+
+        if (use_sarif && sarif_path[0]) {
+            generate_sarif_report(sarif_path,
+                                   errors, error_count,
+                                   result.execution_time_ms);
+        }
+        if (use_ci) {
+            generate_ci_output(source_files, source_count,
+                               errors, error_count,
+                               error_count > 0 ? EXIT_ERRORS_FOUND : EXIT_CLEAN,
+                               result.execution_time_ms);
+        }
+
         return error_count > 0 ? EXIT_ERRORS_FOUND : EXIT_CLEAN;
     }
 
@@ -4824,6 +5323,12 @@ int main(int argc, char *argv[])
                                             binary_path,
                                             result.compiler_output,
                                             sizeof(result.compiler_output)) == 0) {
+                result.compilation_success = true;
+            }
+        } else if (use_msan) {
+            if (compile_with_msan(source_files, source_count, binary_path,
+                                  result.compiler_output,
+                                  sizeof(result.compiler_output)) == 0) {
                 result.compilation_success = true;
             }
         } else if (use_clang_tidy) {
@@ -4890,10 +5395,28 @@ int main(int argc, char *argv[])
     }
 
     if (!result.compilation_success) {
+        if (use_ci) {
+            generate_ci_output(source_files, source_count,
+                               NULL, 0,
+                               EXIT_COMPILE_FAIL, 0);
+        }
         print_colored(&colors, colors.red, "[COMPILE ERROR]\n");
         if (result.compiler_output[0])
             printf("%s\n", result.compiler_output);
         return EXIT_COMPILE_FAIL;
+    }
+
+    /* --compile-only: compilation passed, skip binary execution */
+    if (use_compile_only) {
+        print_colored(&colors, colors.green, "[OK] ");
+        printf("Compilation successful (--compile-only, binary not run)\n");
+        if (!keep_binary) unlink(binary_path);
+        if (use_ci) {
+            generate_ci_output(source_files, source_count,
+                               NULL, 0,
+                               EXIT_CLEAN, 0);
+        }
+        return EXIT_CLEAN;
     }
 
     struct timespec start_time, end_time;
@@ -4938,6 +5461,8 @@ int main(int argc, char *argv[])
         } else {
             if (use_tsan)
                 setenv("TSAN_OPTIONS", "report_atomic_races=1:halt_on_error=0", 1);
+            else if (use_msan)
+                setenv("MSAN_OPTIONS", "halt_on_error=0:exit_code=1", 1);
             else
                 setenv("ASAN_OPTIONS", "detect_leaks=1", 1);
 
@@ -5126,6 +5651,25 @@ int main(int argc, char *argv[])
 
     if (!keep_binary)
         cleanup_binary(binary_path);
+
+    /* --sarif: generate SARIF report */
+    if (use_sarif && sarif_path[0]) {
+        int ret = generate_sarif_report(sarif_path,
+                                         errors, error_count,
+                                         result.execution_time_ms);
+        if (ret == 0) {
+            print_colored(&colors, colors.green, "[SARIF] ");
+            printf("Report saved to: %s\n", sarif_path);
+        }
+    }
+
+    /* --ci: emit JSON summary to stdout */
+    if (use_ci) {
+        int exit_status = error_count > 0 ? EXIT_ERRORS_FOUND : EXIT_CLEAN;
+        generate_ci_output(source_files, source_count,
+                           errors, error_count,
+                           exit_status, result.execution_time_ms);
+    }
 
     return error_count > 0 ? EXIT_ERRORS_FOUND : EXIT_CLEAN;
 }
