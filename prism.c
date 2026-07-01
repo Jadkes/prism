@@ -444,7 +444,7 @@ int compile_with_strict_aliasing(const char **sources, int source_count,
     size_t pos;
 
     pos = snprintf(cmd, sizeof(cmd),
-                   "gcc -O2 -fstrict-aliasing -Wstrict-aliasing=1 -c -o /dev/null");
+                   "gcc -O2 -fstrict-aliasing -Wstrict-aliasing=1 -fsyntax-only");
     for (i = 0; i < source_count && pos < sizeof(cmd) - 4; i++)
         pos += snprintf(cmd + pos, sizeof(cmd) - pos, " '%s'", sources[i]);
 
@@ -478,7 +478,7 @@ int compile_with_float_equal_warning(const char **sources, int source_count,
     size_t pos;
 
     pos = snprintf(cmd, sizeof(cmd),
-                   "gcc -Wfloat-equal -c -o /dev/null");
+                   "gcc -Wfloat-equal -fsyntax-only");
     for (i = 0; i < source_count && pos < sizeof(cmd) - 4; i++)
         pos += snprintf(cmd + pos, sizeof(cmd) - pos, " '%s'", sources[i]);
 
@@ -515,7 +515,7 @@ int compile_with_conversion_warnings(const char **sources, int source_count,
     size_t pos;
 
     pos = snprintf(cmd, sizeof(cmd),
-                   "gcc -Wconversion%s -c -o /dev/null",
+                   "gcc -Wconversion%s -fsyntax-only",
                    include_sign_conversion ? "" : " -Wno-sign-conversion");
     for (i = 0; i < source_count && pos < sizeof(cmd) - 4; i++)
         pos += snprintf(cmd + pos, sizeof(cmd) - pos, " '%s'", sources[i]);
@@ -2187,9 +2187,7 @@ int run_max_analysis(const char **sources, int source_count,
     printf("========================================\n");
     printf("Running 11 analysis passes...\n\n");
 
-    /* ------------------------------------------------------------------ */
     /* Pass 1/6 — Sanitizers (ASan + UBSan)                                */
-    /* ------------------------------------------------------------------ */
     printf("[1/11] Sanitizers (ASan+UBSan)...");
     fflush(stdout);
     memset(result->compiler_output, 0, sizeof(result->compiler_output));
@@ -2234,9 +2232,7 @@ int run_max_analysis(const char **sources, int source_count,
         printf(" COMPILE ERROR\n");
     }
 
-    /* ------------------------------------------------------------------ */
     /* Pass 2/6 — Compiler Warnings                                        */
-    /* ------------------------------------------------------------------ */
     printf("[2/11] Compiler Warnings...");
     fflush(stdout);
     memset(temp_output, 0, sizeof(temp_output));
@@ -2300,9 +2296,7 @@ int run_max_analysis(const char **sources, int source_count,
         printf(" FAILED\n");
     }
 
-    /* ------------------------------------------------------------------ */
     /* Pass 3/6 — GCC Analyzer (-fanalyzer)                                */
-    /* ------------------------------------------------------------------ */
     printf("[3/11] GCC Analyzer...");
     fflush(stdout);
     memset(temp_output, 0, sizeof(temp_output));
@@ -2322,9 +2316,7 @@ int run_max_analysis(const char **sources, int source_count,
         printf(" FAILED\n");
     }
 
-    /* ------------------------------------------------------------------ */
     /* Pass 4/6 — Clang-Tidy                                               */
-    /* ------------------------------------------------------------------ */
     printf("[4/11] Clang-Tidy...");
     fflush(stdout);
     memset(temp_output, 0, sizeof(temp_output));
@@ -2395,9 +2387,7 @@ int run_max_analysis(const char **sources, int source_count,
         printf(" FAILED\n");
     }
 
-    /* ------------------------------------------------------------------ */
     /* Pass 5/6 — Valgrind                                                 */
-    /* ------------------------------------------------------------------ */
     printf("[5/11] Valgrind...");
     fflush(stdout);
 
@@ -2442,9 +2432,7 @@ int run_max_analysis(const char **sources, int source_count,
         }
     }
 
-    /* ------------------------------------------------------------------ */
     /* Pass 6/6 — ThreadSanitizer                                          */
-    /* ------------------------------------------------------------------ */
     printf("[6/11] ThreadSanitizer...");
     fflush(stdout);
     memset(result->compiler_output, 0, sizeof(result->compiler_output));
@@ -2488,9 +2476,7 @@ int run_max_analysis(const char **sources, int source_count,
         printf(" COMPILE ERROR\n");
     }
 
-    /* ------------------------------------------------------------------ */
     /* Pass 7/11 — Strict Aliasing Check                                    */
-    /* ------------------------------------------------------------------ */
     printf("[7/11] Strict Aliasing...");
     fflush(stdout);
     memset(temp_output, 0, sizeof(temp_output));
@@ -2517,9 +2503,7 @@ int run_max_analysis(const char **sources, int source_count,
         printf(" OK - no violations\n");
     }
 
-    /* ------------------------------------------------------------------ */
     /* Pass 8/11 — Float-Equal Check                                       */
-    /* ------------------------------------------------------------------ */
     printf("[8/11] Float Comparison...");
     fflush(stdout);
     memset(temp_output, 0, sizeof(temp_output));
@@ -2546,9 +2530,7 @@ int run_max_analysis(const char **sources, int source_count,
         printf(" OK - no violations\n");
     }
 
-    /* ------------------------------------------------------------------ */
     /* Pass 9/11 — Conversion Check                                         */
-    /* ------------------------------------------------------------------ */
     printf("[9/11] Conversion Check...");
     fflush(stdout);
     memset(temp_output, 0, sizeof(temp_output));
@@ -2576,9 +2558,7 @@ int run_max_analysis(const char **sources, int source_count,
         printf(" OK - no violations\n");
     }
 
-    /* ------------------------------------------------------------------ */
     /* Pass 10/11 — cppcheck                                                */
-    /* ------------------------------------------------------------------ */
     printf("[10/11] cppcheck...");
     fflush(stdout);
     memset(temp_output, 0, sizeof(temp_output));
@@ -2611,9 +2591,7 @@ int run_max_analysis(const char **sources, int source_count,
         printf(" DONE - %d findings\n", cp_count);
     }
 
-    /* ------------------------------------------------------------------ */
     /* Pass 11/11 — clang --analyze                                         */
-    /* ------------------------------------------------------------------ */
     printf("[11/11] clang-analyze...");
     fflush(stdout);
     memset(temp_output, 0, sizeof(temp_output));
@@ -5734,8 +5712,8 @@ int main(int argc, char *argv[])
                     if (find_compile_commands(source_files[i],
                                               detected,
                                               sizeof(detected)) == 0) {
-                        strncpy(project_json, detected,
-                                sizeof(project_json) - 1);
+                        snprintf(project_json, sizeof(project_json), "%s",
+                                 detected);
                         print_colored(&colors, colors.cyan, "[project] ");
                         printf("Auto-detected: %s\n", project_json);
                     }
@@ -5753,8 +5731,8 @@ int main(int argc, char *argv[])
             char detected[MAX_PATH_LEN];
             if (find_compile_commands(".", detected,
                                       sizeof(detected)) == 0) {
-                strncpy(project_json, detected,
-                        sizeof(project_json) - 1);
+                snprintf(project_json, sizeof(project_json), "%s",
+                         detected);
                 print_colored(&colors, colors.cyan, "[project] ");
                 printf("Auto-detected: %s\n", project_json);
             }
