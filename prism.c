@@ -431,6 +431,113 @@ int compile_with_clang_tidy(const char **sources, int source_count,
 }
 
 /*
+ * compile_with_strict_aliasing - Detect type-punning via -Wstrict-aliasing=1
+ *                                Compiles to /dev/null, no binary produced.
+ */
+int compile_with_strict_aliasing(const char **sources, int source_count,
+                                  char *output, size_t output_size)
+{
+    char cmd[MAX_PATH_LEN * 8 + 128];
+    FILE *pipe;
+    size_t bytes_read;
+    int i;
+    size_t pos;
+
+    pos = snprintf(cmd, sizeof(cmd),
+                   "gcc -O2 -fstrict-aliasing -Wstrict-aliasing=1 -c -o /dev/null");
+    for (i = 0; i < source_count && pos < sizeof(cmd) - 4; i++)
+        pos += snprintf(cmd + pos, sizeof(cmd) - pos, " '%s'", sources[i]);
+
+    if (pos >= sizeof(cmd) - 4) {
+        snprintf(output, output_size, "Too many source files");
+        return -1;
+    }
+    pos += snprintf(cmd + pos, sizeof(cmd) - pos, " 2>&1");
+
+    pipe = popen(cmd, "r");
+    if (!pipe) {
+        snprintf(output, output_size, "Failed to start compiler");
+        return -1;
+    }
+
+    bytes_read = fread(output, 1, output_size - 1, pipe);
+    output[bytes_read] = '\0';
+    return pclose(pipe);
+}
+
+/*
+ * compile_with_float_equal_warning - Catch floating-point ==/!= via -Wfloat-equal
+ */
+int compile_with_float_equal_warning(const char **sources, int source_count,
+                                      char *output, size_t output_size)
+{
+    char cmd[MAX_PATH_LEN * 8 + 128];
+    FILE *pipe;
+    size_t bytes_read;
+    int i;
+    size_t pos;
+
+    pos = snprintf(cmd, sizeof(cmd),
+                   "gcc -Wfloat-equal -c -o /dev/null");
+    for (i = 0; i < source_count && pos < sizeof(cmd) - 4; i++)
+        pos += snprintf(cmd + pos, sizeof(cmd) - pos, " '%s'", sources[i]);
+
+    if (pos >= sizeof(cmd) - 4) {
+        snprintf(output, output_size, "Too many source files");
+        return -1;
+    }
+    pos += snprintf(cmd + pos, sizeof(cmd) - pos, " 2>&1");
+
+    pipe = popen(cmd, "r");
+    if (!pipe) {
+        snprintf(output, output_size, "Failed to start compiler");
+        return -1;
+    }
+
+    bytes_read = fread(output, 1, output_size - 1, pipe);
+    output[bytes_read] = '\0';
+    return pclose(pipe);
+}
+
+/*
+ * compile_with_conversion_warnings - Catch implicit truncation via -Wconversion
+ *     Default: suppresses -Wsign-conversion (too noisy). Use --conversion=all
+ *     to enable full -Wconversion.
+ */
+int compile_with_conversion_warnings(const char **sources, int source_count,
+                                      char *output, size_t output_size,
+                                      bool include_sign_conversion)
+{
+    char cmd[MAX_PATH_LEN * 8 + 128];
+    FILE *pipe;
+    size_t bytes_read;
+    int i;
+    size_t pos;
+
+    pos = snprintf(cmd, sizeof(cmd),
+                   "gcc -Wconversion%s -c -o /dev/null",
+                   include_sign_conversion ? "" : " -Wno-sign-conversion");
+    for (i = 0; i < source_count && pos < sizeof(cmd) - 4; i++)
+        pos += snprintf(cmd + pos, sizeof(cmd) - pos, " '%s'", sources[i]);
+
+    if (pos >= sizeof(cmd) - 4) {
+        snprintf(output, output_size, "Too many source files");
+        return -1;
+    }
+    pos += snprintf(cmd + pos, sizeof(cmd) - pos, " 2>&1");
+
+    pipe = popen(cmd, "r");
+    if (!pipe) {
+        snprintf(output, output_size, "Failed to start compiler");
+        return -1;
+    }
+
+    bytes_read = fread(output, 1, output_size - 1, pipe);
+    output[bytes_read] = '\0';
+    return pclose(pipe);
+}
+
+/*
  * compile_cpp_for_warnings - Compile C++ with warning flags only
  */
 int compile_cpp_for_warnings(const char **sources, int source_count,

@@ -173,6 +173,25 @@ int compile_with_clang_tidy(const char **sources, int source_count,
                             char *output, size_t output_size);
 
 /*
+ * compile_with_strict_aliasing - Detect type-punning via -Wstrict-aliasing=1
+ */
+int compile_with_strict_aliasing(const char **sources, int source_count,
+                                  char *output, size_t output_size);
+
+/*
+ * compile_with_float_equal_warning - Catch floating-point ==/!= via -Wfloat-equal
+ */
+int compile_with_float_equal_warning(const char **sources, int source_count,
+                                      char *output, size_t output_size);
+
+/*
+ * compile_with_conversion_warnings - Catch implicit truncation via -Wconversion
+ */
+int compile_with_conversion_warnings(const char **sources, int source_count,
+                                      char *output, size_t output_size,
+                                      bool include_sign_conversion);
+
+/*
  * compile_cpp_with_analyzer - Compile C++ with GCC static analyzer (-fanalyzer)
  */
 int compile_cpp_with_analyzer(const char **sources, int source_count,
