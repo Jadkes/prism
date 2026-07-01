@@ -21,10 +21,17 @@ and dangerous api calls.
 
 `--quick` — just gcc warnings
 `--full` — asan + ubsan
-`--ultra` — the big one. 11 compiles, 24+ analysis passes in parallel.
+`--ultra` — the big one. 31 analysis passes in parallel.
+`--max` — 11 passes sequentially, good for CI
 `--tsan` — thread sanitizer
 `--analyzer` — gcc -fanalyzer
 `--clang-tidy` — clang-tidy
+`--cppcheck` — cppcheck static analysis
+`--clang-analyze` — clang --analyze (path-sensitive)
+`--iwyu` — include-what-you-use
+`--strict-aliasing` — check type-punning violations
+`--float-equal` — catch float ==/!= comparisons
+`--conversion` — find implicit conversion loss
 `--valgrind` — valgrind memcheck (slow but worth it)
 `--fuzz` — boundary fuzz (empty, huge, negative inputs)
 `--rerun=N` — run N times, catch heisenbugs
