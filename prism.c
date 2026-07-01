@@ -5219,6 +5219,13 @@ int main(int argc, char *argv[])
     bool use_install_hook = false;
     bool use_uninstall_hook = false;
     bool use_ast = false;
+    bool use_cppcheck = false;
+    bool use_clang_analyze = false;
+    bool use_iwyu = false;
+    bool use_strict_aliasing = false;
+    bool use_float_equal = false;
+    bool use_conversion = false;
+    bool conversion_all = false;
     char baseline_path[MAX_PATH_LEN] = {0};
     char link_flags_buf[4096] = {0};
     char git_bisect_ref[256] = {0};
@@ -5253,6 +5260,20 @@ int main(int argc, char *argv[])
             use_analyzer = true;
         } else if (strcmp(argv[i], "--clang-tidy") == 0) {
             use_clang_tidy = true;
+        } else if (strcmp(argv[i], "--cppcheck") == 0) {
+            use_cppcheck = true;
+        } else if (strcmp(argv[i], "--clang-analyze") == 0) {
+            use_clang_analyze = true;
+        } else if (strcmp(argv[i], "--iwyu") == 0) {
+            use_iwyu = true;
+        } else if (strcmp(argv[i], "--strict-aliasing") == 0) {
+            use_strict_aliasing = true;
+        } else if (strcmp(argv[i], "--float-equal") == 0) {
+            use_float_equal = true;
+        } else if (strncmp(argv[i], "--conversion", 12) == 0) {
+            use_conversion = true;
+            if (strcmp(argv[i] + 12, "=all") == 0)
+                conversion_all = true;
         } else if (strcmp(argv[i], "--valgrind") == 0) {
             use_valgrind = true;
         } else if (strcmp(argv[i], "--max") == 0) {
@@ -5605,7 +5626,9 @@ int main(int argc, char *argv[])
         !use_valgrind && !use_max && !use_fuzz && !use_danger &&
         !use_resources && !use_gcov && !use_libfuzzer && !use_ultra &&
         !use_full && !use_checksec && !use_header &&
-        !use_compile_only && rerun_count == 0) {
+        !use_compile_only && !use_cppcheck && !use_clang_analyze &&
+        !use_iwyu && !use_strict_aliasing && !use_float_equal &&
+        !use_conversion && rerun_count == 0) {
         use_quick = true;
     }
 
@@ -5631,7 +5654,10 @@ int main(int argc, char *argv[])
     bool needs_linking = use_full || use_quick || use_tsan || use_msan ||
                          use_valgrind || use_fuzz || rerun_count > 0 ||
                          use_resources || use_gcov || use_libfuzzer ||
-                         use_max || use_checksec;
+                         use_max || use_checksec || use_cppcheck ||
+                         use_clang_analyze || use_iwyu ||
+                         use_strict_aliasing || use_float_equal ||
+                         use_conversion;
     if (!use_ast && !needs_linking && jobs > 1 && source_count > 1) {
         int active_children = 0;
         int total_errors = 0;
@@ -6035,6 +6061,97 @@ int main(int argc, char *argv[])
         return EXIT_CLEAN;
     }
 
+    /* External tool passes: cppcheck, clang-analyze, iwyu — no compilation */
+    if (use_cppcheck || use_clang_analyze || use_iwyu) {
+        result.compilation_success = true;
+        struct timespec ext_start, ext_end;
+        clock_gettime(CLOCK_MONOTONIC, &ext_start);
+        if (use_cppcheck)
+            run_cppcheck(source_files, source_count,
+                         result.sanitizer_output,
+                         sizeof(result.sanitizer_output));
+        else if (use_clang_analyze)
+            run_clang_analyze(source_files, source_count,
+                              result.sanitizer_output,
+                              sizeof(result.sanitizer_output));
+        else if (use_iwyu)
+            run_iwyu(source_files, source_count,
+                     result.sanitizer_output,
+                     sizeof(result.sanitizer_output));
+        clock_gettime(CLOCK_MONOTONIC, &ext_end);
+        get_execution_time(&ext_start, &ext_end, &result.execution_time_ms);
+
+        /* Parse the output for errors */
+        int ext_error_count = 0;
+        char *line = strtok(result.sanitizer_output, "\n");
+        while (line && ext_error_count < 32) {
+            if (use_cppcheck) {
+                /* Format: file:line:col: severity: Message [id] */
+                if (strstr(line, ": error:") || strstr(line, ": warning:") ||
+                    strstr(line, ": style:")) {
+                    char fcopy[MAX_LINE_LEN];
+                    strncpy(fcopy, line, sizeof(fcopy) - 1);
+                    char *c1 = strchr(fcopy, ':');
+                    if (c1) {
+                        int ln = atoi(c1 + 1);
+                        if (ln > 0) {
+                            *c1 = '\0';
+                            strncpy(errors[ext_error_count].source_file, fcopy,
+                                    sizeof(errors[ext_error_count].source_file) - 1);
+                            errors[ext_error_count].source_line = ln;
+                            errors[ext_error_count].has_source = true;
+                        }
+                    }
+                    if (strstr(line, ": error:"))
+                        errors[ext_error_count].severity = 3;
+                    else if (strstr(line, ": warning:"))
+                        errors[ext_error_count].severity = 2;
+                    else
+                        errors[ext_error_count].severity = 1;
+                    errors[ext_error_count].type = ERR_UNKNOWN;
+                    snprintf(errors[ext_error_count].title,
+                             sizeof(errors[ext_error_count].title), "%s", line);
+                    ext_error_count++;
+                }
+            } else if (use_clang_analyze) {
+                /* Skip "note:" lines — only emit "warning:" lines */
+                if (strstr(line, "warning:") && !strstr(line, ": note:")) {
+                    errors[ext_error_count].type = ERR_UNKNOWN;
+                    errors[ext_error_count].severity = 2;
+                    errors[ext_error_count].has_source = false;
+                    char fcopy[MAX_LINE_LEN];
+                    strncpy(fcopy, line, sizeof(fcopy) - 1);
+                    char *c1 = strchr(fcopy, ':');
+                    if (c1) {
+                        int ln = atoi(c1 + 1);
+                        if (ln > 0) {
+                            *c1 = '\0';
+                            strncpy(errors[ext_error_count].source_file, fcopy,
+                                    sizeof(errors[ext_error_count].source_file) - 1);
+                            errors[ext_error_count].source_line = ln;
+                            errors[ext_error_count].has_source = true;
+                        }
+                    }
+                    snprintf(errors[ext_error_count].title,
+                             sizeof(errors[ext_error_count].title), "%s", line);
+                    ext_error_count++;
+                }
+            } else if (use_iwyu) {
+                if (strstr(line, "should add") || strstr(line, "should remove")) {
+                    errors[ext_error_count].type = ERR_UNKNOWN;
+                    errors[ext_error_count].severity = 1;
+                    errors[ext_error_count].has_source = false;
+                    snprintf(errors[ext_error_count].title,
+                             sizeof(errors[ext_error_count].title), "%s", line);
+                    ext_error_count++;
+                }
+            }
+            line = strtok(NULL, "\n");
+        }
+        print_summary(&colors, &result, ext_error_count, errors);
+        return ext_error_count > 0 ? EXIT_ERRORS_FOUND : EXIT_CLEAN;
+    }
+
     /* --checksec: check binary hardening */
     if (use_checksec) {
         const char *bin_path = source_files[0];
@@ -6269,6 +6386,25 @@ int main(int argc, char *argv[])
                                        sizeof(result.compiler_output)) == 0) {
                 result.compilation_success = true;
             }
+        } else if (use_strict_aliasing) {
+            if (compile_with_strict_aliasing(source_files, source_count,
+                                             result.compiler_output,
+                                             sizeof(result.compiler_output)) == 0) {
+                result.compilation_success = true;
+            }
+        } else if (use_float_equal) {
+            if (compile_with_float_equal_warning(source_files, source_count,
+                                                  result.compiler_output,
+                                                  sizeof(result.compiler_output)) == 0) {
+                result.compilation_success = true;
+            }
+        } else if (use_conversion) {
+            if (compile_with_conversion_warnings(source_files, source_count,
+                                                  result.compiler_output,
+                                                  sizeof(result.compiler_output),
+                                                  conversion_all) == 0) {
+                result.compilation_success = true;
+            }
         } else if (is_cpp_file(source_files[0])) {
             if (use_tsan) {
                 if (compile_cpp_with_tsan(source_files, source_count, binary_path,
@@ -6338,6 +6474,16 @@ int main(int argc, char *argv[])
         return EXIT_COMPILE_FAIL;
     }
 
+    /* Compile-flag passes (compile to /dev/null, no binary to run) */
+    if (use_strict_aliasing || use_float_equal || use_conversion) {
+        if (result.compiler_output[0]) {
+            printf("\n%s", result.compiler_output);
+            error_count = 1;
+        }
+        print_summary(&colors, &result, error_count, errors);
+        return result.compiler_output[0] ? EXIT_ERRORS_FOUND : EXIT_CLEAN;
+    }
+
     /* --compile-only: compilation passed, skip binary execution */
     if (use_compile_only) {
         print_colored(&colors, colors.green, "[OK] ");
@@ -6354,7 +6500,9 @@ int main(int argc, char *argv[])
     /* Check if the binary actually exists (project-flags compilation of
      * a single file from a multi-file project produces linker errors —
      * no binary, but compilation was valid) */
-    if (project_json[0] && access(binary_path, X_OK) != 0 && !use_clang_tidy) {
+    if (project_json[0] && access(binary_path, X_OK) != 0 &&
+        !use_clang_tidy && !use_strict_aliasing &&
+        !use_float_equal && !use_conversion) {
         print_colored(&colors, colors.yellow, "[project] ");
         printf("Binary not created; compilation succeeded but linking "
                "needs more source files.\n");
